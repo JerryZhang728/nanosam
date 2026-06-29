@@ -16,7 +16,7 @@ seconds — no dataset."*
 ## Quick start on a fresh Jetson
 
 ```bash
-git clone <your-repo-url> jetson-sam-demo
+git clone https://github.com/JerryZhang728/jetson-sam-demo.git
 cd jetson-sam-demo
 
 # 1. Host bootstrap: Docker, NVIDIA runtime, the libnvdla fix, jetson-containers.
