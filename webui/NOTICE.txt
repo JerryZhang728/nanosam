@@ -1,0 +1,19 @@
+ConanAI SAM WebUI
+=================
+
+This directory is a fork of NVIDIA's live-vlm-webui
+  https://github.com/NVIDIA-AI-IOT/live-vlm-webui
+licensed under Apache License 2.0.
+
+Original work:
+  Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+  All files retain their original SPDX-FileCopyrightText / SPDX-License-Identifier
+  headers. Modifications are marked in-file (mainly: vlm_service.py removed and
+  replaced by owl_sam_service.py; server.py + video_processor.py + static/index.html
+  adapted to drive an in-process NanoOWL + NanoSAM inference path instead of an
+  OpenAI-compatible VLM API).
+
+Modifications:
+  Copyright (c) 2026 ConanAI / jetson-sam-demo contributors.
+
+Apache License, Version 2.0 — https://www.apache.org/licenses/LICENSE-2.0

@@ -1,0 +1,402 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 ConanAI / jetson-sam-demo
+# SPDX-FileCopyrightText: Portions Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+#
+# This module replaces live-vlm-webui's vlm_service.py with an in-process
+# NanoOWL (text-prompted detection) + NanoSAM (box-prompted segmentation) service.
+# It mirrors VLMService's public surface (process_frame / get_current_response /
+# get_metrics / update_prompt / update_api_settings) so the rest of the live-vlm-webui
+# server (server.py, video_processor.py) keeps working unchanged.
+#
+# Two things differ from VLMService:
+#   1. There is no external API — inference is in-process via the NanoOWL + NanoSAM
+#      TRT engines that container_setup.sh builds under /data.
+#   2. We expose get_last_annotation() returning a BGR ndarray with boxes + masks
+#      already drawn. VideoProcessorTrack uses it to replace the live frame so the
+#      browser sees the annotated video (instead of overlaying text in HTML, which
+#      is what VLMService does).
+
+import asyncio
+import logging
+import time
+from typing import Optional, Tuple
+
+import cv2
+import numpy as np
+import PIL.Image
+
+logger = logging.getLogger(__name__)
+
+
+_PALETTE = [
+    (56, 56, 255), (56, 255, 56), (255, 56, 56), (56, 255, 255),
+    (255, 56, 255), (255, 255, 56), (255, 128, 0), (128, 0, 255),
+]
+
+
+def _color(i: int):
+    return _PALETTE[i % len(_PALETTE)]
+
+
+# Diagnostic modes — selected via the model dropdown in the UI.
+MODE_OWL_SAM = "nanoowl+nanosam"   # default: OWL detect → SAM segment per box
+MODE_OWL_ONLY = "nanoowl"          # OWL detect → boxes only (skip SAM)
+MODE_SAM_ONLY = "nanosam"          # SAM full-frame box prompt (skip OWL)
+VALID_MODES = {MODE_OWL_SAM, MODE_OWL_ONLY, MODE_SAM_ONLY}
+
+
+class OwlSamService:
+    """NanoOWL + NanoSAM inference service shaped like VLMService."""
+
+    def __init__(
+        self,
+        owl_engine: str,
+        sam_image_encoder_engine: Optional[str] = None,
+        sam_mask_decoder_engine: Optional[str] = None,
+        prompt: str = "[a person]",
+        mask_alpha: float = 0.5,
+        owl_threshold: float = 0.1,
+        owl_model_name: str = "google/owlvit-base-patch32",
+        # The next args exist only so server.py's VLMService(model=..., api_base=...)
+        # call sites can reach us without changes. `model` doubles as the mode selector.
+        # Default to OWL-only — most reliable mode; users can switch to combined in the UI.
+        model: str = MODE_OWL_ONLY,
+        api_base: str = "local",
+        api_key: str = "N/A",
+        max_tokens: int = 0,
+    ):
+        self.owl_engine = owl_engine
+        self.sam_image_encoder_engine = sam_image_encoder_engine
+        self.sam_mask_decoder_engine = sam_mask_decoder_engine
+        self.prompt = prompt
+        self.mask_alpha = mask_alpha
+        self.owl_threshold = owl_threshold
+        self.owl_model_name = owl_model_name
+
+        # VLMService-compatible attributes (server.py reads these)
+        self._mode = model if model in VALID_MODES else MODE_OWL_SAM
+        self.api_base = api_base
+        self.api_key = api_key
+        self.max_tokens = max_tokens
+
+        # State
+        self.current_response = "Initializing..."
+        self.is_processing = False
+        self._processing_lock = asyncio.Lock()
+        self._last_request_payload = None
+        self._last_response_payload = None
+        self._last_annotation: Optional[np.ndarray] = None
+
+        # Metrics
+        self.last_inference_time = 0.0
+        self.total_inferences = 0
+        self.total_inference_time = 0.0
+
+        # Lazily-initialized predictors (loading TRT engines takes seconds)
+        self._owl = None
+        self._sam = None
+        self._tree = None
+        self._clip_enc = None
+        self._owl_enc = None
+        self._encoded_prompt: Optional[str] = None
+
+    # ---- Lazy predictor initialization ----
+    def _ensure_predictors(self):
+        if self._owl is None:
+            logger.info(
+                f"Loading NanoOWL TreePredictor (model={self.owl_model_name}, "
+                f"engine={self.owl_engine})..."
+            )
+            from nanoowl.tree_predictor import TreePredictor
+            from nanoowl.owl_predictor import OwlPredictor
+            self._owl = TreePredictor(
+                owl_predictor=OwlPredictor(
+                    model_name=self.owl_model_name,
+                    image_encoder_engine=self.owl_engine,
+                )
+            )
+            logger.info("NanoOWL ready.")
+
+        if self._sam is None and self.sam_image_encoder_engine and self.sam_mask_decoder_engine:
+            try:
+                logger.info("Loading NanoSAM Predictor (one-time)...")
+                from nanosam.utils.predictor import Predictor as SamPredictor
+                self._sam = SamPredictor(
+                    self.sam_image_encoder_engine,
+                    self.sam_mask_decoder_engine,
+                )
+                logger.info("NanoSAM ready.")
+            except Exception as e:
+                logger.warning(f"NanoSAM unavailable — running OWL only: {e}")
+                self._sam = None
+
+    def _ensure_prompt_encoded(self):
+        if self._encoded_prompt == self.prompt and self._tree is not None:
+            return
+        from nanoowl.tree import Tree
+        self._tree = Tree.from_prompt(self.prompt)
+        self._clip_enc = self._owl.encode_clip_text(self._tree)
+        self._owl_enc = self._owl.encode_owl_text(self._tree)
+        self._encoded_prompt = self.prompt
+        logger.info(f"Encoded prompt: {self.prompt!r}")
+
+    # ---- Mode selector (exposed as `.model` so the UI's model-dropdown plumbing works) ----
+    @property
+    def model(self):
+        return self._mode
+
+    @model.setter
+    def model(self, new_value):
+        if not new_value:
+            return
+        if new_value in VALID_MODES:
+            old = self._mode
+            self._mode = new_value
+            if old != new_value:
+                logger.info(f"Mode switched: {old} → {new_value}")
+        else:
+            logger.warning(f"Ignoring unknown mode/model: {new_value!r} (valid: {sorted(VALID_MODES)})")
+
+    # ---- Inference ----
+    def _run_inference(self, pil_image: PIL.Image.Image) -> Tuple[np.ndarray, str]:
+        """Branch on self._mode. Returns (annotated_bgr, summary_text)."""
+        self._ensure_predictors()
+        bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+        h, w = bgr.shape[:2]
+
+        if self._mode == MODE_SAM_ONLY:
+            return self._run_sam_only(pil_image, bgr, h, w)
+        return self._run_owl_path(pil_image, bgr, h, w)
+
+    def _run_owl_path(self, pil_image, bgr, h, w):
+        """OWL detect → (optionally) SAM segment per box → draw boxes."""
+        from nanoowl.tree_drawing import draw_tree_output
+
+        self._ensure_prompt_encoded()
+        # NanoOWL's TreePredictor.predict accepts `threshold`; lower it to surface
+        # more (lower-confidence) detections. Default 0.1 mirrors upstream.
+        try:
+            output = self._owl.predict(
+                pil_image,
+                tree=self._tree,
+                clip_text_encodings=self._clip_enc,
+                owl_text_encodings=self._owl_enc,
+                threshold=self.owl_threshold,
+            )
+        except TypeError:
+            # Older NanoOWL signatures may not accept threshold
+            output = self._owl.predict(
+                pil_image,
+                tree=self._tree,
+                clip_text_encodings=self._clip_enc,
+                owl_text_encodings=self._owl_enc,
+            )
+
+        # Strip the implicit root "image" detection (covers the whole frame, score 1.0).
+        output.detections = self._strip_root_detections(output.detections)
+
+        if (
+            self._mode == MODE_OWL_SAM
+            and self._sam is not None
+            and len(output.detections) > 0
+        ):
+            bgr = self._overlay_sam_masks(pil_image, bgr, output, h, w)
+
+        bgr = draw_tree_output(bgr, output, self._tree)
+        return bgr, self._owl_summary(output)
+
+    def _strip_root_detections(self, detections):
+        """Remove detections whose label resolves to the implicit root "image" node.
+        NanoOWL always emits a whole-frame detection at score 1.0 for the tree root."""
+        root_ids = set()
+        labels_attr = getattr(self._tree, "labels", None)
+        if isinstance(labels_attr, dict):
+            for k, v in labels_attr.items():
+                if str(v).strip().lower() == "image":
+                    try:
+                        root_ids.add(int(k))
+                    except (TypeError, ValueError):
+                        pass
+        elif isinstance(labels_attr, (list, tuple)):
+            for i, item in enumerate(labels_attr):
+                name = item.name if hasattr(item, "name") else str(item)
+                if name.strip().lower() == "image":
+                    root_ids.add(getattr(item, "id", i))
+        if not root_ids:
+            return detections
+        return [d for d in detections if not d.labels or d.labels[0] not in root_ids]
+
+    def _overlay_sam_masks(self, pil_image, bgr, output, h, w):
+        """One set_image per frame, one predict() per detection box, alpha-blend masks."""
+        try:
+            self._sam.set_image(pil_image)
+        except Exception as e:
+            logger.warning(f"SAM set_image failed: {e}")
+            return bgr
+        for det in output.detections:
+            x0, y0, x1, y1 = det.box
+            x0i, y0i = int(max(0, x0)), int(max(0, y0))
+            x1i, y1i = int(min(w, x1)), int(min(h, y1))
+            if x1i - x0i < 2 or y1i - y0i < 2:
+                continue
+            points = np.array([[x0i, y0i], [x1i, y1i]])
+            labels = np.array([2, 3])
+            try:
+                mask, iou, _ = self._sam.predict(points, labels)
+            except Exception as e:
+                logger.warning(f"SAM predict failed for det {det.id}: {e}")
+                continue
+            mask_bool = self._pick_best_mask(mask, iou, (h, w))
+            if mask_bool is None:
+                continue
+            overlay = bgr.copy()
+            overlay[mask_bool] = _color(det.id)
+            bgr = cv2.addWeighted(overlay, self.mask_alpha, bgr, 1 - self.mask_alpha, 0)
+        return bgr
+
+    def _run_sam_only(self, pil_image, bgr, h, w):
+        """SAM with a full-frame box prompt — diagnostic mode. Without a point/box click
+        prompt from the user, SAM almost always returns a huge near-full-frame mask, so
+        we relax the degenerate-mask guard for this mode (the mask IS the diagnostic)."""
+        if self._sam is None:
+            return bgr, "SAM engines not loaded"
+        try:
+            self._sam.set_image(pil_image)
+        except Exception as e:
+            return bgr, f"SAM set_image error: {e}"
+        points = np.array([[0, 0], [w, h]])
+        labels = np.array([2, 3])
+        try:
+            mask, iou, _ = self._sam.predict(points, labels)
+        except Exception as e:
+            return bgr, f"SAM predict error: {e}"
+        mask_bool = self._pick_best_mask(mask, iou, (h, w), max_coverage=0.99)
+        if mask_bool is None:
+            return bgr, "SAM returned no usable mask (shape mismatch)"
+        overlay = bgr.copy()
+        overlay[mask_bool] = _color(0)
+        bgr = cv2.addWeighted(overlay, self.mask_alpha, bgr, 1 - self.mask_alpha, 0)
+        return bgr, (
+            f"SAM-only mask coverage: {100*float(mask_bool.mean()):.0f}%  "
+            f"(prompt = full-frame box; click-prompt UI not yet built)"
+        )
+
+    @staticmethod
+    def _pick_best_mask(mask, iou, expected_shape, max_coverage: float = 0.80):
+        """Pick the highest-IoU mask, threshold at 0, reject degenerate (> max_coverage)."""
+        n_masks = mask.shape[1] if mask.dim() == 4 else 1
+        if n_masks > 1 and iou is not None and iou.numel() >= n_masks:
+            best_idx = int(iou[0].argmax().item())
+        else:
+            best_idx = 0
+        mask_bool = (mask[0, best_idx] > 0).detach().cpu().numpy()
+        if mask_bool.shape != expected_shape:
+            logger.warning(f"Mask shape mismatch: {mask_bool.shape} vs frame {expected_shape}")
+            return None
+        coverage = float(mask_bool.mean())
+        if coverage > max_coverage:
+            logger.info(f"Skip degenerate mask: covers {100*coverage:.0f}% of frame")
+            return None
+        return mask_bool
+
+    def _owl_summary(self, output):
+        """Human-readable detection summary. Tree.labels can be list[str], list[obj], or dict —
+        build a robust int→name lookup, fall back to str() of the raw label id."""
+        n = len(output.detections)
+        if n == 0:
+            return f"No matches for {self.prompt}"
+        label_lookup = {}
+        try:
+            labels_attr = getattr(self._tree, "labels", None)
+            if isinstance(labels_attr, dict):
+                label_lookup = {int(k): str(v) for k, v in labels_attr.items()}
+            elif isinstance(labels_attr, (list, tuple)):
+                for i, item in enumerate(labels_attr):
+                    if hasattr(item, "name"):
+                        label_lookup[getattr(item, "id", i)] = item.name
+                    else:
+                        label_lookup[i] = str(item)
+        except Exception:
+            pass
+        parts = []
+        for det in output.detections:
+            lid = det.labels[0] if det.labels else None
+            name = label_lookup.get(lid, str(lid) if lid is not None else "?")
+            if det.scores:
+                parts.append(f"{name} ({det.scores[0]:.2f})")
+            else:
+                parts.append(name)
+        return f"Detected {n}: " + ", ".join(parts)
+
+    async def process_frame(self, image: PIL.Image.Image, prompt: Optional[str] = None) -> None:
+        """Public entrypoint mirroring VLMService.process_frame.
+        If `prompt` is provided, switches to it for this and future frames."""
+        if self._processing_lock.locked():
+            return
+        if prompt is not None and prompt != self.prompt:
+            self.update_prompt(prompt)
+
+        async with self._processing_lock:
+            self.is_processing = True
+            t0 = time.perf_counter()
+            try:
+                # Run the heavy TRT inference off the event loop
+                bgr, summary = await asyncio.get_event_loop().run_in_executor(
+                    None, self._run_inference, image
+                )
+                self._last_annotation = bgr
+                self.current_response = summary
+                dt = time.perf_counter() - t0
+                self.last_inference_time = dt
+                self.total_inferences += 1
+                self.total_inference_time += dt
+                logger.info(f"OWL+SAM: {summary} ({dt*1000:.0f}ms)")
+            except Exception as e:
+                logger.error(f"Inference failed: {type(e).__name__}: {e}", exc_info=True)
+                self.current_response = f"Error ({type(e).__name__}): {e}"
+            finally:
+                self.is_processing = False
+
+    # ---- VLMService-compatible read API ----
+    def get_current_response(self) -> Tuple[str, bool]:
+        return self.current_response, self.is_processing
+
+    def get_metrics(self) -> dict:
+        avg = (self.total_inference_time / self.total_inferences) if self.total_inferences else 0.0
+        return {
+            "last_latency_ms": self.last_inference_time * 1000,
+            "avg_latency_ms": avg * 1000,
+            "total_inferences": self.total_inferences,
+            "is_processing": self.is_processing,
+        }
+
+    def get_last_request_payload(self):
+        return self._last_request_payload
+
+    def get_last_response_payload(self):
+        return self._last_response_payload
+
+    def get_last_annotation(self) -> Optional[np.ndarray]:
+        """BGR ndarray with boxes + masks baked in, or None before first inference."""
+        return self._last_annotation
+
+    # ---- Mutation API (called via websocket from index.html) ----
+    def update_prompt(self, new_prompt: str, max_tokens: Optional[int] = None) -> None:
+        new_prompt = (new_prompt or "").strip()
+        if not new_prompt:
+            return
+        # Be forgiving: NanoOWL needs the tree expression "[a foo, a bar]". If the
+        # user typed "a foo, a bar" or just "a foo", wrap it ourselves.
+        if not (new_prompt.startswith("[") and new_prompt.endswith("]")):
+            new_prompt = "[" + new_prompt.strip("[] ") + "]"
+        self.prompt = new_prompt
+        # Force re-encode on next inference
+        self._encoded_prompt = None
+        logger.info(f"Prompt set: {new_prompt}")
+
+    def update_api_settings(self, api_base: Optional[str] = None, api_key: Optional[str] = None) -> None:
+        # No remote API; kept for VLMService interface compatibility.
+        if api_base:
+            self.api_base = api_base
+        if api_key is not None:
+            self.api_key = api_key if api_key else "N/A"

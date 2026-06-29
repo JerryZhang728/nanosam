@@ -1,0 +1,136 @@
+# CLAUDE.md — jetson-sam-demo project notes
+
+> Living notes for the NanoOWL/NanoSAM live demo. Auto-loaded by Claude Code when run in this repo.
+> This repo is meant to be **git-cloned to any new NVIDIA Jetson** to reproduce the demo. Keep these
+> notes and the scripts updated as the project evolves.
+
+## Goal
+Live **text-prompted segmentation** demo for **Automation Taipei 2026** (Aug 19–22, Nangang Taipei).
+Pitch: *"zero-training AOI — set up a new inspection in 30 seconds, no dataset."*
+Pipeline: **NanoOWL** (text → boxes) → **NanoSAM** (box → mask), real-time on the Jetson, shown in a
+browser web UI (the SAM analog of live-vlm-webui).
+
+## Reference hardware / OS (first device)
+- Board EEP-150N carrier, **Jetson Orin NX 16GB** (GPU compute 8.7), IP **192.168.8.16**, user `ubuntu`
+- **JetPack 6.2 / L4T R36.4.4**, **CUDA 12.6**, TensorRT 10.4, Ubuntu 22.04 (glibc 2.35), ~179 GB free
+- No camera attached → demo runs from a video file; a USB webcam will be used at the show.
+
+## Reproducible setup (what the scripts encode)
+Run `bash setup_host.sh` on a fresh Jetson. It is idempotent and does:
+1. Install Docker; add user to docker group.
+2. Install **nvidia-container-toolkit**; `nvidia-ctk runtime configure --runtime=docker`; restart docker.
+3. Enable the **L4T apt repo** (uncomment `common` + `t234` in `nvidia-l4t-apt-source.list`).
+4. **Fix the missing `libnvdla_compiler.so`** — the key gotcha. Minimized flashes ship
+   `libnvdla_runtime.so` but not the compiler lib, so the container's TensorRT throws
+   `ImportError: libnvdla_compiler.so: cannot open shared object file`. The script installs
+   `nvidia-l4t-dla-compiler` **pinned to the same version as `nvidia-l4t-core`** (auto-detected).
+5. Clone + `install.sh` **jetson-containers**.
+
+Then, inside `jetson-containers run $(autotag nanoowl)`, run `bash /data/scripts/container_setup.sh`
+to build the OWL engine, generate the test video, patch the demo, and launch the web UI on **:7860**.
+
+## Status log
+- [x] Host setup + Docker + nvidia runtime working.
+- [x] libnvdla fix applied (lib present, listed in `drivers.csv`).
+- [x] `dustynv/nanoowl:r36.4.0` pulled.
+- [x] OWL-ViT TensorRT engine built → `/data/owl_image_encoder_patch32.engine`.
+- [x] `owl_predict` validated (TensorRT inference OK; ignore the cosmetic read-only cv2 draw error).
+- [x] Patched `/data/tree_demo` (`--video` + loop); `/data/test.mp4` generated from assets.
+      Note: had to install `aiohttp` (use `--index-url https://pypi.org/simple`); the read-loop
+      patch must match only the `if not re:`/`return re, None` pair (file has blank lines between stmts).
+- [x] **Web demo CONFIRMED** — draws live boxes at http://192.168.8.16:7860 for typed prompts.
+      Test feed dwell is controlled by FRAMES_PER_IMG in make_test_video.py (demo ignores video FPS).
+- [x] **NanoSAM** mask overlay — verified live on Jetson (engines built, tree_demo at :7860 draws
+      colored masks under OWL boxes). The patched `tree_demo` is now the **legacy fallback**.
+- [~] **ConanAI SAM WebUI** (`webui/`) — fork of live-vlm-webui swapping VLMService → OwlSamService.
+      WebRTC + aiohttp + NVIDIA dark theme reused; in-process NanoOWL + NanoSAM inference returns
+      annotated frames that VideoProcessorTrack swaps into the outgoing track. Runs on `:7860`
+      (HTTPS, self-signed cert). **Awaiting first launch on Jetson — verify next.**
+- [ ] **AOI logic** (ROI per slot, presence/count, PASS/FAIL + MISSING/MISPLACED overlay).
+- [ ] (Optional) SAM → VLM chain.
+- [ ] Booth polish: lighting, USB camera (`--camera 0`), fullscreen UI, pitch script.
+
+## Gotchas (don't relearn these)
+- Container runs `--rm` → **only `/data` persists** (host `~/jetson-containers/data`). Keep work there.
+- Keep all L4T components on the **same version** (here 36.4.4).
+- `tree_demo.py` loads `./index.html` relatively → launch from inside `/data/tree_demo`.
+- `cv2.VideoCapture` takes a file path too; our patch loops it by seeking to frame 0 on EOF.
+
+## NanoSAM integration (implemented; awaiting on-device verification)
+**Path chosen:** add nanosam *inside* the existing nanoowl container (no second container, no IPC).
+Same process feeds OWL boxes straight into SAM.
+
+**What the new scripts do:**
+- `scripts/install_nanosam.sh` — clones `NVIDIA-AI-IOT/nanosam` to `/data/nanosam`, downloads the two
+  ONNX weights (from **stable mirrors** — upstream Drive link for the image encoder is dead, see
+  nanosam issue #41), and builds both TRT engines via `/usr/src/tensorrt/bin/trtexec`.
+- `scripts/patch_tree_demo_sam.py` — anchored string-patch over `/data/tree_demo/tree_demo.py`:
+  imports `nanosam.utils.predictor.Predictor`, adds CLI args
+  (`--sam_image_encoder_engine`, `--sam_mask_decoder_engine`, `--no_sam`, `--mask_alpha`),
+  instantiates SAM after the TreePredictor, and inserts an `_overlay_sam_masks` step right BEFORE
+  the existing `draw_tree_output` call.
+- `container_setup.sh` calls both, then `export PYTHONPATH=/data/nanosam` before launching.
+
+**SAM call pattern (do not regress):** `sam.set_image(image_pil)` **once per frame** (heavy ResNet18
+encoder), then `sam.predict(points, labels)` **once per detection box** (cheap decoder). Box prompt
+is `points = [[x0,y0],[x1,y1]]` with `labels = [2, 3]` (top-left, bottom-right — SAM convention).
+`predict()` returns a torch CUDA tensor `(1, N, H, W)` at input resolution; convert with
+`(mask[0,0] > 0).detach().cpu().numpy()`.
+
+**Things that will bite if forgotten:**
+- `set_image` calls `.height/.width` — must pass a `PIL.Image`, NOT a numpy array. We reuse
+  `image_pil` from `cv2_to_pil(image)` that tree_demo already builds.
+- Decoder TRT build can fail on TRT 10.x with `IIOneHotLayer cannot be used to compute a shape
+  tensor` (nanosam issue #40). Fallback: re-export with
+  `python3 -m nanosam.tools.export_sam_mask_decoder_onnx --opset 17 --return-single-mask --gelu-approximate`.
+- `setup.py develop --user` writes to `~/.local`, which is wiped on container `--rm`. We rely on
+  `PYTHONPATH=/data/nanosam` instead.
+- `OwlPredictor` boxes (`TreeDetection.box`) come out as **xyxy pixels at input resolution** —
+  feed straight to SAM, no scaling needed.
+
+## ConanAI SAM WebUI architecture (the new UI)
+Forked from NVIDIA's live-vlm-webui (Apache 2.0). Reuses: aiohttp + aiortc (WebRTC) + static
+HTML/JS + NVIDIA dark theme + GPU monitor + RTSP/local-file source support + multi-session
+plumbing. Replaces only the inference module.
+
+**Key swap:** `webui/vlm_service.py` (removed) → `webui/owl_sam_service.py` (new). `OwlSamService`
+exposes the same interface as `VLMService` (`process_frame`, `get_current_response`, `get_metrics`,
+`update_prompt`, `update_api_settings`) plus one addition: `get_last_annotation()` returning a BGR
+ndarray with boxes + masks already drawn. `webui/video_processor.py` calls it inside `recv()`; when
+an annotated frame exists it's swapped into the outgoing WebRTC track (with the live frame's pts /
+time_base preserved) so the browser sees masks + boxes baked into the video.
+
+**Inference cadence:** `--process-every 3` means inference fires every 3rd incoming frame, with
+the `_processing_lock` guarding overlapping invocations. Effective rate is roughly
+`min(webcam_fps / 3, 1 / inference_latency)` ≈ 3–7 fps on Orin NX for OWL+SAM. Between inference
+cycles the *same* annotated frame keeps being emitted (so display rate ≈ inference rate while
+inference is engaged). That's intentional — masks are the value-add; smooth-but-stale masks would
+misalign with moving content.
+
+**Why `vlm_service` survives as a dict key / aliased import:** server.py is ~1k LOC of lifted code
+with many `session["vlm_service"]` references; renaming would multiply the diff for no behavioral
+gain. video_processor.py uses `from .owl_sam_service import OwlSamService as VLMService` for the
+same reason. Future refactor can rename if it ever becomes confusing.
+
+**Future-merger reservation (per the ConanAI demo-hub plan):** the NVIDIA theme CSS variables
+(`--nvidia-green`, `--bg-primary`, etc.) are kept verbatim in `webui/static/index.html`. When the
+sibling VLM/SAM/etc. demos and a top-level hub at `~/conanai/` arrive, lifting the shared CSS into
+`~/conanai/shared/` will be mechanical because everything already uses the same variable names.
+
+## Next steps after the webui is live
+- **AOI logic**: per-slot ROIs, presence/count, PASS/FAIL + MISSING/MISPLACED overlay.
+- **Mode selector** in the UI: OWL+SAM / OWL-only / SAM-only (click-to-segment, no text prompt).
+- **Source dropdown** in the UI: image upload / video upload / webcam / RTSP.
+- (Optional) SAM → VLM chain.
+- ConanAI hub + shared CSS extraction once a second polished spoke exists.
+- Booth polish: USB camera plumbing, fullscreen UI, lighting, pitch script.
+
+## Wider project decisions (context, not part of this demo)
+
+- **Factory AOI / kitting verification** (~12 product models): trained **YOLO (YOLO11 / YOLO26)** on a
+  shared **part vocabulary** + per-product **recipe** (parts, counts, ROIs). SAM/MobileSAM used mainly
+  for **auto-labeling** training data, not runtime.
+- **Scratch on dark metal**: not YOLO — **anomaly detection** (Anomalib: EfficientAD / PatchCore) on
+  good parts only; invest first in **lighting/optics** (dark-field / grazing / photometric stereo).
+- **Licensing**: Ultralytics YOLO (v5/v8/v11/v26) is **AGPL-3.0** (commercial closed-source ⇒ Enterprise
+  License). Apache-2.0 alternatives: YOLOX, PP-YOLOE, DAMO-YOLO. NanoOWL/NanoSAM/MobileSAM are permissive.

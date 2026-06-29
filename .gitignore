@@ -1,0 +1,13 @@
+# Large / generated artifacts — rebuild these on each device, don't commit them
+*.engine
+*.mp4
+*.onnx
+data/
+__pycache__/
+*.pyc
+
+# runtime log + local backup — not part of the package
+log
+*.log
+webui.bak/
+.claude/settings.local.json
