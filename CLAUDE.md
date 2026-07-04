@@ -51,7 +51,23 @@ to build the OWL engine, generate the test video, patch the demo, and launch the
 - [ ] Booth polish: lighting, USB camera (`--camera 0`), fullscreen UI, pitch script.
 
 ## Gotchas (don't relearn these)
+- **VRAM leak → OOM after ~1 min (FIXED — root cause was WebRTC, NOT the models).** Symptom: unified
+  memory climbs ~5→14.8GB over a minute of live video, caps at 16GB, board throttles / container dies.
+  **Root cause:** the `MediaRelay.subscribe()` calls in `server.py` used the default `buffered=True`,
+  which gives each subscriber an *unbounded* frame queue. The video source decodes at native FPS (~25-30)
+  but the Jetson encodes+sends only ~10 FPS to the browser; the ~15 FPS difference (raw ~6MB frames)
+  piled up in that queue forever. **Fix:** `relay.subscribe(track, buffered=False)` on all 3 call sites
+  (RTSP / local-file / webcam) — serve latest frame, drop the backlog (correct for a live demo anyway).
+  **How we proved it:** `[mem]` logging in `owl_sam_service` showed `torch_alloc` DEAD FLAT at 1.05GB
+  across hundreds of inferences while total RAM ran to 14.8GB → the leak was entirely outside PyTorch.
+  Lesson: a timed OOM under live video is almost always frame-buffer backpressure, not the model. TOPS
+  is irrelevant (that shows as low FPS, never a timed stop).
+- Secondary/defensive (kept, but were NOT the leak): `_run_inference` runs under `torch.inference_mode()`
+  (good hygiene; neither NanoOWL nor NanoSAM wraps its own forwards). `SAM_EMPTY_CACHE_EVERY` /
+  `SAM_MEM_LOG_EVERY` env knobs remain for diagnostics; empty_cache defaults OFF (torch wasn't leaking).
 - Container runs `--rm` → **only `/data` persists** (host `~/jetson-containers/data`). Keep work there.
+  The webui runs from the STAGED copy at `/data/webui/`; after editing `webui/` in the repo, re-copy it
+  (`cp webui/*.py ~/Public/jetson-containers/data/webui/`) or the container won't see the change.
 - Keep all L4T components on the **same version** (here 36.4.4).
 - `tree_demo.py` loads `./index.html` relatively → launch from inside `/data/tree_demo`.
 - `cv2.VideoCapture` takes a file path too; our patch loops it by seeking to frame 0 on EOF.
@@ -112,10 +128,18 @@ with many `session["vlm_service"]` references; renaming would multiply the diff 
 gain. video_processor.py uses `from .owl_sam_service import OwlSamService as VLMService` for the
 same reason. Future refactor can rename if it ever becomes confusing.
 
-**Future-merger reservation (per the ConanAI demo-hub plan):** the NVIDIA theme CSS variables
-(`--nvidia-green`, `--bg-primary`, etc.) are kept verbatim in `webui/static/index.html`. When the
-sibling VLM/SAM/etc. demos and a top-level hub at `~/conanai/` arrive, lifting the shared CSS into
-`~/conanai/shared/` will be mechanical because everything already uses the same variable names.
+**Repo layout (decided):** this project is now one **self-contained** repo under the local
+`~/conanai/` group folder (`~/conanai/nanosam/`), a sibling of the future `vlm/` and `yolo/` projects.
+Each project carries its **own** `container/` (jetson-containers glue + `/data` mount), `scripts/`,
+and `webui/` — clone one folder, install, run; no shared top-level infra. `~/conanai/` itself is just
+a grouping folder, not a repo. See `~/conanai/README.md` for the rules.
+
+**Future-merger reservation (DEFERRED, not shared-now):** the NVIDIA theme CSS variables
+(`--nvidia-green`, `--bg-primary`, etc.) are kept verbatim in `webui/static/index.html`, and each
+project's webui reuses the same variable names. We deliberately do **not** share a `webui/` yet —
+per-project UIs diverge (SAM overlays vs VLM captions vs YOLO boxes) and a shared repo would break the
+one-folder-clone goal. Only if keeping the ~90%-common framework in sync becomes painful *after a
+second real spoke exists* do we extract the common core into a small library.
 
 ## Next steps after the webui is live
 - **AOI logic**: per-slot ROIs, presence/count, PASS/FAIL + MISSING/MISPLACED overlay.

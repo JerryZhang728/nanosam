@@ -18,12 +18,14 @@
 
 import asyncio
 import logging
+import os
 import time
 from typing import Optional, Tuple
 
 import cv2
 import numpy as np
 import PIL.Image
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,23 @@ _PALETTE = [
 
 def _color(i: int):
     return _PALETTE[i % len(_PALETTE)]
+
+
+# --- Memory management / leak diagnostics (tunable via env for A/B testing) ---
+# SAM_EMPTY_CACHE_EVERY=N : call torch.cuda.empty_cache() every N inferences (0=off).
+#   Default 1 (every inference). If the VRAM climb FLATTENS with this on, the leak
+#   was CUDA allocator *fragmentation* — empty_cache is the fix. If it STILL climbs,
+#   it's a true leak (held tensors) or TRT-side raw cudaMalloc that torch can't free.
+# SAM_MEM_LOG_EVERY=N : log torch allocated vs reserved every N inferences (0=off).
+#   allocated grows  -> real tensor leak (references retained).
+#   allocated flat, reserved grows -> fragmentation (empty_cache helps).
+#   both flat but tegrastats still climbs -> leak OUTSIDE torch (TensorRT / CPU).
+# Default OFF: on-device diagnosis showed torch stays flat at ~1GB (alloc≈reserved,
+# no leak, no fragmentation) — the real leak was the aiortc relay's unbounded frame
+# buffer (fixed in server.py with buffered=False). empty_cache per-frame just adds a
+# device sync for no benefit here. Left as a knob in case a future model fragments.
+_EMPTY_CACHE_EVERY = int(os.environ.get("SAM_EMPTY_CACHE_EVERY", "0"))
+_MEM_LOG_EVERY = int(os.environ.get("SAM_MEM_LOG_EVERY", "20"))
 
 
 # Diagnostic modes — selected via the model dropdown in the UI.
@@ -91,6 +110,7 @@ class OwlSamService:
         self.last_inference_time = 0.0
         self.total_inferences = 0
         self.total_inference_time = 0.0
+        self._infer_calls = 0  # local counter for cache/mem-log cadence
 
         # Lazily-initialized predictors (loading TRT engines takes seconds)
         self._owl = None
@@ -159,14 +179,34 @@ class OwlSamService:
 
     # ---- Inference ----
     def _run_inference(self, pil_image: PIL.Image.Image) -> Tuple[np.ndarray, str]:
-        """Branch on self._mode. Returns (annotated_bgr, summary_text)."""
-        self._ensure_predictors()
-        bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
-        h, w = bgr.shape[:2]
+        """Branch on self._mode. Returns (annotated_bgr, summary_text).
 
-        if self._mode == MODE_SAM_ONLY:
-            return self._run_sam_only(pil_image, bgr, h, w)
-        return self._run_owl_path(pil_image, bgr, h, w)
+        The whole body runs under torch.inference_mode(): neither NanoOWL nor
+        NanoSAM wraps its own forward passes, so with autograd left on, every
+        frame's activation tensors are retained for a backward pass that never
+        comes. On the Jetson's unified GPU/CPU memory that leaks ~8→15GB over a
+        minute until it OOMs and throttles. inference_mode() disables autograd
+        for both models at once, so nothing is retained frame-to-frame.
+        """
+        self._ensure_predictors()
+        self._infer_calls += 1
+        with torch.inference_mode():
+            bgr = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+            h, w = bgr.shape[:2]
+
+            if self._mode == MODE_SAM_ONLY:
+                result = self._run_sam_only(pil_image, bgr, h, w)
+            else:
+                result = self._run_owl_path(pil_image, bgr, h, w)
+
+        n = self._infer_calls
+        if _EMPTY_CACHE_EVERY and n % _EMPTY_CACHE_EVERY == 0:
+            torch.cuda.empty_cache()
+        if _MEM_LOG_EVERY and n % _MEM_LOG_EVERY == 0:
+            a = torch.cuda.memory_allocated() / 1e9
+            r = torch.cuda.memory_reserved() / 1e9
+            logger.info(f"[mem] inf#{n} torch_alloc={a:.2f}GB torch_reserved={r:.2f}GB")
+        return result
 
     def _run_owl_path(self, pil_image, bgr, h, w):
         """OWL detect → (optionally) SAM segment per box → draw boxes."""

@@ -721,8 +721,12 @@ async def offer(request):
             # Wait for initial connection to get stream info
             await asyncio.sleep(0.5)
 
-            # Wrap RTSP track with relay first (same pattern as webcam)
-            relayed_rtsp = relay.subscribe(rtsp_track)
+            # Wrap RTSP track with relay first (same pattern as webcam).
+            # buffered=False: serve only the latest frame, DROP the backlog. With
+            # the default buffered=True, aiortc queues every source frame per
+            # subscriber unboundedly; when the encoder is slower than the source
+            # FPS the queue grows forever (~6MB/raw frame) and OOMs the Jetson.
+            relayed_rtsp = relay.subscribe(rtsp_track, buffered=False)
 
             processor_track = VideoProcessorTrack(
                 relayed_rtsp, session_vlm, text_callback=session_callback
@@ -766,7 +770,7 @@ async def offer(request):
             # Quick yield so any initial async work settles before SDP.
             await asyncio.sleep(0.1)
 
-            relayed = relay.subscribe(local_track)
+            relayed = relay.subscribe(local_track, buffered=False)  # drop backlog, latest-frame only (see RTSP note)
             processor_track = VideoProcessorTrack(
                 relayed, session_vlm, text_callback=session_callback
             )
@@ -807,7 +811,8 @@ async def offer(request):
             if track.kind == "video":
                 # Create processor track with this session's VLM and session-scoped callback
                 processor_track = VideoProcessorTrack(
-                    relay.subscribe(track), session_vlm, text_callback=session_callback
+                    relay.subscribe(track, buffered=False),  # drop backlog, latest-frame only (see RTSP note)
+                    session_vlm, text_callback=session_callback
                 )
 
                 # Add processed track back to connection
