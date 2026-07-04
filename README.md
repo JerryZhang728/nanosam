@@ -37,12 +37,20 @@ jetson-containers run $(autotag nanoowl)
 bash /data/scripts/container_setup.sh
 ```
 
+Or, once staged, launch it in **one command** from the host with the wrapper:
+
+```bash
+container/run_demo.sh          # enters the container + runs container_setup.sh for you
+```
+
 Then open **https://<jetson-ip>:7860** from any PC on the LAN (accept the self-signed cert) and
 type a prompt, e.g. `[an owl, a glove, a frog]`. Boxes + masks render on the live video.
 
 ## Files
 - `setup_host.sh` — idempotent host setup. Encodes the **libnvdla_compiler.so** fix (auto-matched to
   your `nvidia-l4t-core` version) that minimized flashes need.
+- `container/` — jetson-containers integration for this project (`run_demo.sh` one-command launcher +
+  the `data/` bind mount that becomes `/data` inside the container). See `container/README.md`.
 - `webui/` — the **ConanAI SAM WebUI** (forked from live-vlm-webui). aiohttp + WebRTC + static HTML
   serving the live OWL+SAM-annotated camera stream on `:7860`.
   - `owl_sam_service.py` — in-process inference (NanoOWL detect → NanoSAM segment).

@@ -2,9 +2,13 @@
 *.engine
 *.mp4
 *.onnx
-data/
 __pycache__/
 *.pyc
+
+# Runtime data mount: keep the dir (bind-mounted to the container's /data) but
+# not its contents (videos, images, engines are generated/large).
+container/data/*
+!container/data/.gitkeep
 
 # runtime log + local backup — not part of the package
 log
