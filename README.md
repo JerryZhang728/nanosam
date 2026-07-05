@@ -1,4 +1,4 @@
-# jetson-sam-demo
+# nanosam
 
 Live, text-prompted segmentation demo (NanoOWL → NanoSAM) on NVIDIA Jetson, for trade-show /
 factory-AOI demos. Clone to any Jetson (JetPack 6.x / L4T R36.x) and run.
@@ -16,8 +16,8 @@ seconds — no dataset."*
 ## Quick start on a fresh Jetson
 
 ```bash
-git clone https://github.com/JerryZhang728/jetson-sam-demo.git
-cd jetson-sam-demo
+git clone https://github.com/JerryZhang728/nanosam.git
+cd nanosam
 
 # 1. Host bootstrap: Docker, NVIDIA runtime, the libnvdla fix, jetson-containers.
 bash setup_host.sh
@@ -26,10 +26,10 @@ docker info | grep -i runtime         # expect 'nvidia'
 docker run --rm hello-world
 
 # 2. Stage scripts and the webui where the container can see them (host /data mount)
-mkdir -p ~/jetson-containers/data/scripts
-cp scripts/* ~/jetson-containers/data/scripts/
-rm -rf ~/jetson-containers/data/webui
-cp -r  webui    ~/jetson-containers/data/
+mkdir -p ~/Public/jetson-containers/data/scripts
+cp scripts/* ~/Public/jetson-containers/data/scripts/
+rm -rf ~/Public/jetson-containers/data/webui
+cp -r  webui    ~/Public/jetson-containers/data/
 
 # 3. Enter the NanoOWL container and run everything
 jetson-containers run $(autotag nanoowl)
@@ -70,7 +70,7 @@ type a prompt, e.g. `[an owl, a glove, a frog]`. Boxes + masks render on the liv
 - `CLAUDE.md` — full project notes / state / next steps (also auto-loaded if you run Claude Code here).
 
 ## Notes
-- Only `/data` (host: `~/jetson-containers/data`) persists across container runs — keep work there.
+- Only `/data` (host: `~/Public/jetson-containers/data`) persists across container runs — keep work there.
 - Large artifacts (`*.engine`, `*.mp4`, `*.onnx`) are git-ignored; they're rebuilt per device.
 - At the show, swap `--video /data/test.mp4` for a real camera: `--camera 0`.
 
