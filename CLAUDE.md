@@ -128,11 +128,13 @@ with many `session["vlm_service"]` references; renaming would multiply the diff 
 gain. video_processor.py uses `from .owl_sam_service import OwlSamService as VLMService` for the
 same reason. Future refactor can rename if it ever becomes confusing.
 
-**Repo layout (decided):** this project is now one **self-contained** repo under the local
-`~/conanai/` group folder (`~/conanai/nanosam/`), a sibling of the future `vlm/` and `yolo/` projects.
-Each project carries its **own** `container/` (jetson-containers glue + `/data` mount), `scripts/`,
-and `webui/` — clone one folder, install, run; no shared top-level infra. `~/conanai/` itself is just
-a grouping folder, not a repo. See `~/conanai/README.md` for the rules.
+**Repo layout (decided):** this project is one **self-contained** repo living at `~/Public/nanosam/`,
+a sibling of the existing `~/Public/vlm/` project and the future `yolo/`. Each project carries its
+**own** `container/` (container glue + `/data` mount), `scripts/`, and `webui/` — clone one folder,
+install, run; no shared top-level infra. `~/Public/` is just the local folder that groups the
+projects (not a repo). **`jetson-containers` is a shared sibling dependency** at
+`~/Public/jetson-containers` (used by both nanosam and vlm) — it is NOT vendored into this repo;
+`setup_host.sh` clones it and `container/run_demo.sh` locates it via `JETSON_CONTAINERS_DIR`.
 
 **Future-merger reservation (DEFERRED, not shared-now):** the NVIDIA theme CSS variables
 (`--nvidia-green`, `--bg-primary`, etc.) are kept verbatim in `webui/static/index.html`, and each
