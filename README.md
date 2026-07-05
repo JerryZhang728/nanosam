@@ -13,6 +13,14 @@ Type an object name in a browser → the Jetson detects (NanoOWL/OWL-ViT) and se
 live, in real time, at the edge. No training required. Pitch: *"stand up a new inspection in 30
 seconds — no dataset."*
 
+## Requirements
+- An **NVIDIA L4T (Jetson)** host — tested on **Orin NX 16GB, L4T R36.4.x** (JetPack 6.2).
+- **CUDA and TensorRT are NOT required on the host** — they ship inside the `dustynv/nanoowl`
+  container. The host only needs base **L4T** (GPU driver + DLA libs); `setup_host.sh` adds Docker,
+  the NVIDIA container runtime, and the `libnvdla_compiler.so` fix from the L4T apt repo.
+- `setup_host.sh` runs a preflight that **fails fast with a clear message** if L4T isn't present, and
+  installs any missing host basics (`git`, `curl`, `python3-pip`).
+
 ## Quick start on a fresh Jetson
 
 ```bash

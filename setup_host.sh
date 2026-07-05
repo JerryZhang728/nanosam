@@ -6,6 +6,40 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
+echo "== Preflight: require L4T; ensure host basics ============="
+# This demo runs the models INSIDE the dustynv/nanoowl container, which bundles
+# CUDA + TensorRT. The HOST only needs L4T (GPU driver + DLA libs) plus Docker and
+# the NVIDIA container runtime — it does NOT need CUDA or TensorRT installed natively.
+if ! dpkg-query -W -f='${Version}' nvidia-l4t-core >/dev/null 2>&1; then
+  echo "ERROR: 'nvidia-l4t-core' not found — this is not an NVIDIA L4T (Jetson) system." >&2
+  echo "       Flash the board with NVIDIA L4T / JetPack first, then re-run this script." >&2
+  echo "       (You do NOT need CUDA/TensorRT on the host — they ship inside the container —" >&2
+  echo "        but the base L4T BSP must be present.)" >&2
+  exit 1
+fi
+L4T_VER="$(dpkg-query -W -f='${Version}' nvidia-l4t-core)"
+echo ">> L4T detected: nvidia-l4t-core=$L4T_VER"
+L4T_TARGET="36.4"
+case "$L4T_VER" in
+  ${L4T_TARGET}*) echo ">> matches target R${L4T_TARGET}.x (the nanoowl image build) ✓" ;;
+  *) echo ">> WARNING: host L4T ($L4T_VER) != target R${L4T_TARGET}.x — the nanoowl image is" >&2
+     echo "            built for R${L4T_TARGET}.x; a version mismatch can break the driver mount." >&2
+     echo "            Continuing; if inference fails, use an image tag matching your L4T." >&2 ;;
+esac
+# A minimal L4T flash can lack these: git/curl are used below, python3-pip is needed
+# by jetson-containers' install.sh.
+NEED=()
+command -v git  >/dev/null 2>&1 || NEED+=(git)
+command -v curl >/dev/null 2>&1 || NEED+=(curl)
+command -v pip3 >/dev/null 2>&1 || NEED+=(python3-pip)
+if [ "${#NEED[@]}" -gt 0 ]; then
+  echo ">> installing missing host basics: ${NEED[*]}"
+  sudo apt-get update
+  sudo apt-get install -y "${NEED[@]}"
+else
+  echo ">> host basics present (git, curl, pip3) ✓"
+fi
+
 echo "==[1/5] Docker ============================================"
 if ! command -v docker >/dev/null 2>&1; then
   sudo apt-get update
@@ -62,14 +96,31 @@ grep -q libnvdla_compiler.so /etc/nvidia-container-runtime/host-files-for-contai
   || echo ">> NOTE: not in drivers.csv — add a line if the container still can't find it."
 
 echo "==[5/5] jetson-containers ================================="
-if [ ! -d "$HOME/jetson-containers" ]; then
-  git clone --depth 1 https://github.com/dusty-nv/jetson-containers "$HOME/jetson-containers"
+# Clone location MUST match run_demo.sh's default + the README staging path
+# (~/Public/jetson-containers), or the demo won't find the container / data mount.
+JC="${JETSON_CONTAINERS_DIR:-$HOME/Public/jetson-containers}"
+if [ ! -d "$JC" ]; then
+  mkdir -p "$(dirname "$JC")"
+  git clone --depth 1 https://github.com/dusty-nv/jetson-containers "$JC"
 fi
-bash "$HOME/jetson-containers/install.sh"
+bash "$JC/install.sh"
 
 echo
-echo "== DONE. Verify, then launch the container: ==============="
-echo "   docker info | grep -i runtime      # expect 'nvidia' listed"
-echo "   docker run --rm hello-world        # expect 'Hello from Docker!'"
-echo "   jetson-containers run \$(autotag nanoowl)"
+echo "== Smoke test: Docker + NVIDIA runtime ===================="
+if docker info >/dev/null 2>&1; then
+  docker info 2>/dev/null | grep -qi nvidia \
+    && echo ">> NVIDIA container runtime registered ✓" \
+    || echo ">> WARNING: nvidia runtime not visible in 'docker info' — recheck step 2." >&2
+  docker run --rm hello-world >/dev/null 2>&1 \
+    && echo ">> 'docker run' works ✓" \
+    || echo ">> WARNING: 'docker run hello-world' failed — recheck the Docker install." >&2
+else
+  echo ">> Docker not usable from THIS shell yet (docker-group change pending)."
+  echo ">>  Run 'newgrp docker' (or log out/in), then re-run this script to smoke-test."
+fi
+
+echo
+echo "== DONE. Next: launch the container ======================="
+echo "   cd $JC && ./jetson-containers run \$(./autotag nanoowl)"
 echo "   # then inside the container:  bash /data/scripts/container_setup.sh"
+echo "   # or, once webui/scripts are staged into $JC/data:  container/run_demo.sh"
