@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install NanoSAM inside the running nanoowl container and build its TRT engines.
-# All artifacts go under /data (host: ~/jetson-containers/data) so they persist
+# All artifacts go under /data (host: ~/Public/jetson-containers/data) so they persist
 # across the container's --rm restarts. Idempotent: safe to re-run.
 #
 # Run INSIDE the nanoowl container after `jetson-containers run $(autotag nanoowl)`.

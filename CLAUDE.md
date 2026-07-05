@@ -1,4 +1,4 @@
-# CLAUDE.md — jetson-sam-demo project notes
+# CLAUDE.md — nanosam project notes
 
 > Living notes for the NanoOWL/NanoSAM live demo. Auto-loaded by Claude Code when run in this repo.
 > This repo is meant to be **git-cloned to any new NVIDIA Jetson** to reproduce the demo. Keep these
@@ -65,7 +65,7 @@ to build the OWL engine, generate the test video, patch the demo, and launch the
 - Secondary/defensive (kept, but were NOT the leak): `_run_inference` runs under `torch.inference_mode()`
   (good hygiene; neither NanoOWL nor NanoSAM wraps its own forwards). `SAM_EMPTY_CACHE_EVERY` /
   `SAM_MEM_LOG_EVERY` env knobs remain for diagnostics; empty_cache defaults OFF (torch wasn't leaking).
-- Container runs `--rm` → **only `/data` persists** (host `~/jetson-containers/data`). Keep work there.
+- Container runs `--rm` → **only `/data` persists** (host `~/Public/jetson-containers/data`). Keep work there.
   The webui runs from the STAGED copy at `/data/webui/`; after editing `webui/` in the repo, re-copy it
   (`cp webui/*.py ~/Public/jetson-containers/data/webui/`) or the container won't see the change.
 - Keep all L4T components on the **same version** (here 36.4.4).

@@ -43,7 +43,7 @@ bash "$SCRIPTS/install_webui.sh"
 echo "== verify webui has been staged =="
 if [ ! -f "$WEBUI/server.py" ]; then
     echo "ERROR: $WEBUI/server.py missing. On the host, run:"
-    echo "  cp -r webui/ ~/jetson-containers/data/"
+    echo "  cp -r webui/ ~/Public/jetson-containers/data/"
     exit 1
 fi
 
