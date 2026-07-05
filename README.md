@@ -3,6 +3,15 @@
 Live, text-prompted segmentation demo (NanoOWL → NanoSAM) on NVIDIA Jetson, for trade-show /
 factory-AOI demos. Clone to any Jetson (JetPack 6.x / L4T R36.x) and run.
 
+## TL;DR — fresh L4T Jetson
+```bash
+sudo apt install -y git && git clone https://github.com/JerryZhang728/nanosam.git && cd nanosam
+bash setup_host.sh      # sets up Docker, jetson-containers, and the 'sam-demo' command
+newgrp docker           # fresh box only, one time (activates the docker group)
+sam-demo                # stage + launch (first run builds engines — a few minutes)
+# → open https://<jetson-ip>:7860   (or https://localhost:7860 on the Jetson itself)
+```
+
 UI is the **ConanAI SAM WebUI** — a fork of NVIDIA's
 [live-vlm-webui](https://github.com/NVIDIA-AI-IOT/live-vlm-webui) (Apache 2.0). WebRTC + aiohttp
 plumbing, NVIDIA dark theme, and GPU monitor are reused; the VLM inference module is replaced with
@@ -23,42 +32,53 @@ seconds — no dataset."*
 
 ## Quick start on a fresh Jetson
 
+**Step 0 — get the code.** A bare L4T flash may not ship `git`, so install it first (or download the
+repo as a ZIP from GitHub):
 ```bash
+sudo apt-get update && sudo apt-get install -y git    # skip if git is already present
 git clone https://github.com/JerryZhang728/nanosam.git
 cd nanosam
+```
 
-# 1. Host bootstrap: Docker, NVIDIA runtime, the libnvdla fix, jetson-containers.
+**Step 1 — set up the machine (once).** Installs Docker, the NVIDIA container runtime, the
+`libnvdla_compiler.so` fix, jetson-containers, and the `sam-demo` launcher. Idempotent + resumable —
+it fails fast with a clear message if this isn't an L4T host.
+```bash
 bash setup_host.sh
-# log out / back in (docker group), then verify:
-docker info | grep -i runtime         # expect 'nvidia'
-docker run --rm hello-world
+newgrp docker        # fresh box only: activate the docker group once (or log out / back in)
+```
 
-# 2. Stage scripts and the webui where the container can see them (host /data mount)
+**Step 2 — run the demo.** `sam-demo` stages the repo into the container's `/data` and launches
+everything (builds the TRT engines on first run).
+```bash
+sam-demo             # first run pulls the ~GB image + builds engines (a few minutes)
+```
+
+**Step 3 — open it.** From any PC on the LAN: **https://&lt;jetson-ip&gt;:7860** (or
+**https://localhost:7860** on the Jetson itself). Accept the self-signed cert, then type a prompt like
+`[an owl, a glove, a frog]` — boxes + masks render on the live video.
+
+<details><summary>What <code>sam-demo</code> / <code>setup_host.sh</code> do under the hood (manual equivalent)</summary>
+
+```bash
+# stage repo -> container /data mount
 mkdir -p ~/Public/jetson-containers/data/scripts
 cp scripts/* ~/Public/jetson-containers/data/scripts/
 rm -rf ~/Public/jetson-containers/data/webui
-cp -r  webui    ~/Public/jetson-containers/data/
-
-# 3. Enter the NanoOWL container and run everything
-jetson-containers run $(autotag nanoowl)
-#   inside the container:
-bash /data/scripts/container_setup.sh
+cp -r  webui  ~/Public/jetson-containers/data/
+# enter the container and build + launch
+cd ~/Public/jetson-containers
+./jetson-containers run $(./autotag nanoowl) bash /data/scripts/container_setup.sh
 ```
-
-Or, once staged, launch it in **one command** from the host with the wrapper:
-
-```bash
-container/run_demo.sh          # enters the container + runs container_setup.sh for you
-```
-
-Then open **https://<jetson-ip>:7860** from any PC on the LAN (accept the self-signed cert) and
-type a prompt, e.g. `[an owl, a glove, a frog]`. Boxes + masks render on the live video.
+</details>
 
 ## Files
-- `setup_host.sh` — idempotent host setup. Encodes the **libnvdla_compiler.so** fix (auto-matched to
-  your `nvidia-l4t-core` version) that minimized flashes need.
-- `container/` — jetson-containers integration for this project (`run_demo.sh` one-command launcher +
-  the `data/` bind mount that becomes `/data` inside the container). See `container/README.md`.
+- `setup_host.sh` — idempotent host setup: L4T preflight, Docker, NVIDIA runtime, the
+  **libnvdla_compiler.so** fix (auto-matched to your `nvidia-l4t-core` version), jetson-containers, and
+  it installs the **`sam-demo`** command (`/usr/local/bin/sam-demo` → `container/run_demo.sh`).
+- `container/` — jetson-containers integration for this project. `run_demo.sh` (invoked as `sam-demo`)
+  stages the repo into `/data` and launches the container + web UI; `data/` is the bind mount that
+  becomes `/data` inside the container. See `container/README.md`.
 - `webui/` — the **ConanAI SAM WebUI** (forked from live-vlm-webui). aiohttp + WebRTC + static HTML
   serving the live OWL+SAM-annotated camera stream on `:7860`.
   - `owl_sam_service.py` — in-process inference (NanoOWL detect → NanoSAM segment).

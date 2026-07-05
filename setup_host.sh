@@ -6,6 +6,10 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
+# Resolve repo root so this works no matter where it's invoked from.
+REPO="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+cd "$REPO"
+
 echo "== Preflight: require L4T; ensure host basics ============="
 # This demo runs the models INSIDE the dustynv/nanoowl container, which bundles
 # CUDA + TensorRT. The HOST only needs L4T (GPU driver + DLA libs) plus Docker and
@@ -107,7 +111,9 @@ bash "$JC/install.sh"
 
 echo
 echo "== Smoke test: Docker + NVIDIA runtime ===================="
+DOCKER_OK=0
 if docker info >/dev/null 2>&1; then
+  DOCKER_OK=1
   docker info 2>/dev/null | grep -qi nvidia \
     && echo ">> NVIDIA container runtime registered ✓" \
     || echo ">> WARNING: nvidia runtime not visible in 'docker info' — recheck step 2." >&2
@@ -116,11 +122,23 @@ if docker info >/dev/null 2>&1; then
     || echo ">> WARNING: 'docker run hello-world' failed — recheck the Docker install." >&2
 else
   echo ">> Docker not usable from THIS shell yet (docker-group change pending)."
-  echo ">>  Run 'newgrp docker' (or log out/in), then re-run this script to smoke-test."
 fi
 
 echo
-echo "== DONE. Next: launch the container ======================="
-echo "   cd $JC && ./jetson-containers run \$(./autotag nanoowl)"
-echo "   # then inside the container:  bash /data/scripts/container_setup.sh"
-echo "   # or, once webui/scripts are staged into $JC/data:  container/run_demo.sh"
+echo "== Install the 'sam-demo' launcher ======================="
+sudo chmod +x "$REPO/container/run_demo.sh"
+sudo ln -sfn "$REPO/container/run_demo.sh" /usr/local/bin/sam-demo
+echo ">> installed: sam-demo -> $REPO/container/run_demo.sh"
+
+echo
+echo "===================== SETUP COMPLETE ====================="
+if [ "$DOCKER_OK" -ne 1 ]; then
+  echo "  1) Activate the docker group (one time):   newgrp docker"
+  echo "  2) Run the demo:                           sam-demo"
+else
+  echo "  Run the demo:                              sam-demo"
+fi
+echo "  Then open:  https://<this-jetson-ip>:7860   (accept the self-signed cert)"
+echo "              or  https://localhost:7860  on the Jetson itself"
+echo "  First 'sam-demo' pulls the ~GB image + builds TRT engines — give it a few minutes."
+echo "=========================================================="
