@@ -8,6 +8,25 @@ set -euo pipefail
 
 # Resolve repo root so this works no matter where it's invoked from.
 REPO="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+
+# Keep the whole ConanAI stack under one roof: this repo AND jetson-containers both
+# live in ~/Public (jetson-containers is cloned there in step [5/6] below). If nanosam
+# was cloned somewhere else (e.g. ~/nanosam), relocate it next to jetson-containers and
+# re-exec from the new path, so the rest of the script — and the sam-demo symlink it
+# installs — point at the canonical ~/Public/nanosam location.
+DEST="$HOME/Public/nanosam"
+if [ "$REPO" != "$DEST" ]; then
+  echo "== Relocating nanosam into ~/Public (canonical layout) ==="
+  if [ -e "$DEST" ]; then
+    echo "ERROR: $DEST already exists, but this checkout is at $REPO." >&2
+    echo "       Refusing to overwrite. Remove/rename one, then re-run." >&2
+    exit 1
+  fi
+  mkdir -p "$HOME/Public"
+  mv "$REPO" "$DEST"
+  echo ">> moved: $REPO -> $DEST"
+  exec bash "$DEST/setup_host.sh" "$@"
+fi
 cd "$REPO"
 
 echo "== Preflight: require L4T; ensure host basics ============="
@@ -44,7 +63,7 @@ else
   echo ">> host basics present (git, curl, pip3) ✓"
 fi
 
-echo "==[1/5] Docker ============================================"
+echo "==[1/6] Docker ============================================"
 if ! command -v docker >/dev/null 2>&1; then
   sudo apt-get update
   sudo apt-get install -y docker.io
@@ -55,7 +74,7 @@ else
   echo ">> docker already installed."
 fi
 
-echo "==[2/5] NVIDIA container toolkit =========================="
+echo "==[2/6] NVIDIA container toolkit =========================="
 if ! command -v nvidia-ctk >/dev/null 2>&1; then
   curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
     sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
@@ -70,7 +89,7 @@ fi
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 
-echo "==[3/5] Enable L4T apt repo ==============================="
+echo "==[3/6] Enable L4T apt repo ==============================="
 # Needed so we can install the DLA compiler lib below. The repo lines ship commented out.
 L4T_SRC=/etc/apt/sources.list.d/nvidia-l4t-apt-source.list
 if [ -f "$L4T_SRC" ]; then
@@ -81,7 +100,7 @@ else
   echo ">> WARNING: $L4T_SRC not found — L4T repo may already be configured elsewhere."
 fi
 
-echo "==[4/5] Fix missing libnvdla_compiler.so ================="
+echo "==[4/6] Fix missing libnvdla_compiler.so ================="
 # GOTCHA: minimized JetPack flashes ship libnvdla_runtime.so but NOT libnvdla_compiler.so.
 # Without it, TensorRT inside the container fails:
 #   ImportError: libnvdla_compiler.so: cannot open shared object file
@@ -99,7 +118,7 @@ grep -q libnvdla_compiler.so /etc/nvidia-container-runtime/host-files-for-contai
   && echo ">> libnvdla_compiler.so is in drivers.csv (will be mounted into containers)." \
   || echo ">> NOTE: not in drivers.csv — add a line if the container still can't find it."
 
-echo "==[5/5] jetson-containers ================================="
+echo "==[5/6] jetson-containers ================================="
 # Clone location MUST match run_demo.sh's default + the README staging path
 # (~/Public/jetson-containers), or the demo won't find the container / data mount.
 JC="${JETSON_CONTAINERS_DIR:-$HOME/Public/jetson-containers}"
@@ -108,6 +127,39 @@ if [ ! -d "$JC" ]; then
   git clone --depth 1 https://github.com/dusty-nv/jetson-containers "$JC"
 fi
 bash "$JC/install.sh"
+
+echo "==[6/6] jetson-stats — host GPU/VRAM/CPU telemetry ========"
+# The web UI's GPU panel reads Jetson stats via jtop, and jtop needs the jetson-stats
+# 'jtop.service' running ON THE HOST — that service is what creates /run/jtop.sock.
+# jetson-containers' run.sh auto-mounts that socket into the container (run.sh: it
+# only adds '-v /run/jtop.sock:/run/jtop.sock' when the socket already exists), and the
+# in-container jetson-stats (installed by scripts/install_webui.sh) connects to it.
+# WITHOUT the host service there is no socket to mount, so the GPU%/VRAM/CPU bars stay
+# empty. This is the common Jetson gotcha — nvidia-smi does NOT report GPU-util/VRAM on
+# Tegra, so tegrastats/jtop is the only source. (Was fixed in the vlm project; porting
+# the same host-side install here.)
+if command -v jtop >/dev/null 2>&1 && systemctl is-active --quiet jtop.service 2>/dev/null; then
+  echo ">> jetson-stats already installed and jtop.service active ✓"
+else
+  echo ">> installing jetson-stats system-wide (provides jtop.service + /run/jtop.sock)"
+  # Plain install works on JetPack 6.2 (Ubuntu 22.04); newer/externally-managed
+  # Pythons need --break-system-packages. Try both, best-effort.
+  sudo pip3 install -U jetson-stats 2>/dev/null \
+    || sudo pip3 install --break-system-packages -U jetson-stats 2>/dev/null \
+    || sudo python3 -m pip install --break-system-packages -U jetson-stats \
+    || echo ">> WARNING: jetson-stats install failed — GPU/VRAM/CPU panel will stay empty." >&2
+  # The package's postinstall usually sets this up; redo it to be safe.
+  sudo systemctl daemon-reload || true
+  sudo systemctl enable  jtop.service 2>/dev/null || true
+  sudo systemctl restart jtop.service 2>/dev/null || sudo systemctl start jtop.service 2>/dev/null || true
+  sleep 2
+  if systemctl is-active --quiet jtop.service 2>/dev/null; then
+    echo ">> jtop.service is active ✓ (/run/jtop.sock will be mounted into the container)"
+  else
+    echo ">> WARNING: jtop.service did not come up — re-run, or check:" >&2
+    echo "            sudo systemctl status jtop.service" >&2
+  fi
+fi
 
 echo
 echo "== Smoke test: Docker + NVIDIA runtime ===================="

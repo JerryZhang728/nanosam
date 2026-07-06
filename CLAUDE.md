@@ -68,6 +68,19 @@ to build the OWL engine, generate the test video, patch the demo, and launch the
 - Container runs `--rm` → **only `/data` persists** (host `~/Public/jetson-containers/data`). Keep work there.
   The webui runs from the STAGED copy at `/data/webui/`; after editing `webui/` in the repo, re-copy it
   (`cp webui/*.py ~/Public/jetson-containers/data/webui/`) or the container won't see the change.
+- **GPU/VRAM/CPU panel empty in the web UI (jtop/tegrastats gotcha — FIXED).** The UI's
+  monitor reads Jetson stats via `jtop`, which needs the **host's** `jtop.service`
+  (jetson-stats) running — that service is what creates `/run/jtop.sock`. `jetson-containers
+  run.sh` only mounts the socket (`-v /run/jtop.sock:/run/jtop.sock`) **if it already exists**,
+  and the in-container jetson-stats (from `install_webui.sh`) is only the *client*. If
+  jetson-stats isn't installed on the host, there's no socket → nothing mounts → bars stay
+  empty. `nvidia-smi` does NOT report GPU-util/VRAM on Tegra, so jtop is the only source.
+  **Fix:** `setup_host.sh` step **[6/6]** now installs jetson-stats system-wide and
+  enables/starts `jtop.service` on the host (mirrors the vlm project's fix). Verify on host:
+  `systemctl is-active jtop.service` and `ls -l /run/jtop.sock`.
+- **Repo location is self-correcting.** `setup_host.sh` relocates the checkout to
+  `~/Public/nanosam` if it was cloned elsewhere (e.g. `~/nanosam`), so nanosam and the shared
+  `~/Public/jetson-containers` always end up side-by-side under `~/Public`.
 - Keep all L4T components on the **same version** (here 36.4.4).
 - `tree_demo.py` loads `./index.html` relatively → launch from inside `/data/tree_demo`.
 - `cv2.VideoCapture` takes a file path too; our patch loops it by seeking to frame 0 on EOF.
