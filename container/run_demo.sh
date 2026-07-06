@@ -35,7 +35,11 @@ fi
 echo "== staging scripts + webui from $REPO into $JC/data =="
 mkdir -p "$JC/data/scripts"
 cp "$REPO"/scripts/* "$JC/data/scripts/"
-rm -rf "$JC/data/webui"
+# The container runs as root and may have left root-owned __pycache__/*.pyc under the
+# staged webui/, which this (non-root) command can't delete. Fall back to sudo for the
+# wipe; container_setup.sh now sets PYTHONDONTWRITEBYTECODE=1 so new runs stop creating
+# them, meaning the sudo path is only ever hit once (to clear pre-existing leftovers).
+rm -rf "$JC/data/webui" 2>/dev/null || sudo rm -rf "$JC/data/webui"
 cp -r "$REPO/webui" "$JC/data/"
 
 cd "$JC"

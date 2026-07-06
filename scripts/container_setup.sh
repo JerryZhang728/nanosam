@@ -6,6 +6,12 @@
 # (see README for how to stage them on the host).
 set -e
 
+# Don't scatter root-owned __pycache__/*.pyc into the /data-mounted webui/ + scripts/.
+# The container runs as root, so any .pyc it writes there becomes undeletable by the
+# host user on the next `sam-demo` staging wipe. Disabling bytecode caching avoids that
+# (negligible startup cost for a long-running server).
+export PYTHONDONTWRITEBYTECODE=1
+
 ENGINE=/data/owl_image_encoder_patch32.engine
 B16_ENGINE=/data/owl_image_encoder_b16.engine
 LARGE_ENGINE=/data/owl_image_encoder_large.engine
