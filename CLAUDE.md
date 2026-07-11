@@ -70,6 +70,14 @@ to build the OWL engine, generate the test video, patch the demo, and launch the
       inferences, clamped ±600 px/s, dropped after 1s stale. The non-track modes keep the baked path.
 - [x] **UI defaults:** source tab → **Video**, model → **NanoOWL+NanoSAM** (OwlSamService default model
       = MODE_OWL_SAM; models() fallback = nanoowl+nanosam; index.html active tab + panel).
+- [x] **Decoupled tracking + mode-3 masks-only cleanup.** The +bytetrack modes now draw/segment EVERY
+      OWL detection (no gating) and ByteTrack only lends a stable id + coasting to the ones it can
+      match; untracked ones show with no id/coasting (mode 4 capped at SAM_MAX_OBJECTS=20 — segmenting
+      40+ objects OOM-aborts). Mode 3 renders masks only (no box/label).
+      GUIDANCE (the takeaway): ByteTrack associates by frame-to-frame box overlap, so it only helps on
+      objects that move SLOWLY relative to the (slow) inference rate — stable ids, smooth coasting. On
+      FAST/erratic subjects it can't associate, so a +bytetrack mode degrades to ~= its plain twin.
+      Rule of thumb: SLOW subject → use a +bytetrack mode; FAST subject → plain nanoowl / nanoowl+nanosam.
 - [ ] **Perf note / knobs:** "lag" = boxes/masks refresh only at inference rate; not frame-drop
       (`max_frame_latency=0`). N ≈ source_fps × inference_time (OWL/ByteTrack ~170ms→3; +SAM ~365ms→5-6).
       Once inference-bound, lower N just skips dispatches (`_processing_lock`), doesn't help.

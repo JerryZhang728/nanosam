@@ -56,6 +56,10 @@ def _color(i: int):
 _EMPTY_CACHE_EVERY = int(os.environ.get("SAM_EMPTY_CACHE_EVERY", "0"))
 _MEM_LOG_EVERY = int(os.environ.get("SAM_MEM_LOG_EVERY", "20"))
 
+# Max objects segmented per frame in the tracked-mask mode (each = a SAM decode + a stored,
+# per-frame-animated full-frame mask). A big shoal (40+) OOMs/aborts the process; cap it. Tunable.
+_MAX_SEG = int(os.environ.get("SAM_MAX_OBJECTS", "20"))
+
 
 # Modes — selected via the model dropdown in the UI.
 MODE_OWL_SAM = "nanoowl+nanosam"      # OWL detect → SAM segment per box
@@ -266,8 +270,11 @@ class OwlSamService:
             and self._sam is not None
             and len(output.detections) > 0
         ):
+            # Masks only — clean overlay, no boxes/labels drawn.
             bgr = self._overlay_sam_masks(pil_image, bgr, output, h, w)
+            return bgr, self._owl_summary(output)
 
+        # OWL-only (or SAM unavailable): draw boxes + labels.
         bgr = draw_tree_output(bgr, output, self._tree)
         return bgr, self._owl_summary(output)
 
@@ -306,24 +313,39 @@ class OwlSamService:
         else:
             sv_det = sv.Detections.empty()
         tracked = self._tracker.update_with_detections(sv_det)
+        tboxes = []
+        if tracked.tracker_id is not None:
+            for i in range(len(tracked)):
+                tboxes.append((int(tracked.tracker_id[i]), tracked.xyxy[i]))
 
+        # Draw a box for EVERY OWL detection (accuracy == plain OWL — the tracker does NOT gate).
+        # Borrow a stable id + coasting velocity from ByteTrack where it can match; detections the
+        # tracker can't associate (fast/erratic) still show, just with no id label and no coasting.
+        # (ByteTrack's value is on SLOW objects; on fast ones this mode ~= plain nanoowl.)
         now = time.time()
         new_boxes = {}
-        for i in range(len(tracked)):
-            x0, y0, x1, y1 = [float(v) for v in tracked.xyxy[i]]
-            tid = int(tracked.tracker_id[i]) if tracked.tracker_id is not None else i
+        synthetic = 0
+        for det in dets:
+            x0, y0, x1, y1 = [float(v) for v in det.box]
+            if x1 - x0 < 2 or y1 - y0 < 2:
+                continue
             center = np.array([(x0 + x1) / 2.0, (y0 + y1) / 2.0])
-            prev = self._track_boxes.get(tid)
+            tid = self._match_track_id(det.box, tboxes)
+            if tid is None:
+                synthetic -= 1
+                tid = synthetic          # untracked: unique this frame, no id label, no coasting
+            prev = self._track_boxes.get(tid) if tid >= 0 else None
             if prev is not None and (now - prev["t"]) > 1e-3:
                 vel = np.clip((center - prev["center"]) / (now - prev["t"]), -600.0, 600.0)
             else:
                 vel = np.zeros(2)
             new_boxes[tid] = {"box": np.array([x0, y0, x1, y1]), "center": center,
-                              "vel": vel, "t": now, "color": _color(tid)}
+                              "vel": vel, "t": now, "color": _color(tid if tid >= 0 else 0)}
         self._track_boxes = new_boxes   # atomic swap; overlay_live() coasts these on the event loop
 
         bgr = self._draw_track_boxes(bgr, new_boxes, now)
-        return bgr, (f"Tracking {len(new_boxes)} — IDs {sorted(new_boxes.keys())}"
+        pos_ids = sorted(k for k in new_boxes if k >= 0)
+        return bgr, (f"Tracking {len(new_boxes)} — IDs {pos_ids}"
                      if new_boxes else f"No matches for {self.prompt}")
 
     def _draw_track_boxes(self, frame_bgr, state, now):
@@ -342,17 +364,25 @@ class OwlSamService:
                 continue
             col = s["color"]
             cv2.rectangle(frame_bgr, (x0i, y0i), (x1i, y1i), col, 2)
-            cv2.putText(frame_bgr, f"#{tid}", (x0i + 4, max(16, y0i + 20)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
+            if tid >= 0:                          # only tracked objects get a stable #id label
+                cv2.putText(frame_bgr, f"#{tid}", (x0i + 4, max(16, y0i + 20)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
         return frame_bgr
 
     # ---- MODE_TRACK_SAM: OWL → ByteTrack → SAM, mask-only, motion-shifted ----
     def _run_track_sam(self, pil_image, bgr, output, h, w):
-        """Track the OWL detections, segment each tracked box with SAM, and store per-track masks
-        (+ velocity) so the display can motion-shift them between inferences. Renders mask-only
-        (colored per track id; no box, no ID text)."""
+        """Segment EVERY OWL detection with SAM (detection parity with the plain SAM mode), and use
+        ByteTrack only to lend stable ids + velocity to the detections it can match. Under slow SAM
+        the tracker churns and would drop most fast objects, so we must NOT let it gate detection.
+        Renders mask-only (colored per track id; no box, no ID text)."""
         import supervision as sv
         dets = output.detections
+        # Cap objects/frame: each object costs a SAM decode + a stored full-frame mask that gets
+        # re-animated every display frame. 40+ (e.g. a shoal of fish) OOMs/aborts the process.
+        # Keep the highest-scoring _MAX_SEG.
+        if len(dets) > _MAX_SEG:
+            dets = sorted(dets, key=lambda d: (max(d.scores) if d.scores else 0.0),
+                          reverse=True)[:_MAX_SEG]
         if dets:
             boxes = np.array([d.box for d in dets], dtype=float)
             scores = np.array([max(d.scores) if d.scores else 0.5 for d in dets], dtype=float)
@@ -361,6 +391,10 @@ class OwlSamService:
         else:
             sv_det = sv.Detections.empty()
         tracked = self._tracker.update_with_detections(sv_det)
+        tboxes = []
+        if tracked.tracker_id is not None:
+            for i in range(len(tracked)):
+                tboxes.append((int(tracked.tracker_id[i]), tracked.xyxy[i]))
 
         now = time.time()
         try:
@@ -370,9 +404,9 @@ class OwlSamService:
             return bgr, "SAM set_image failed"
 
         new_state = {}
-        for i in range(len(tracked)):
-            tid = int(tracked.tracker_id[i]) if tracked.tracker_id is not None else i
-            x0, y0, x1, y1 = [float(v) for v in tracked.xyxy[i]]
+        synthetic = 0                     # negative keys for untracked detections (unique per frame)
+        for det in dets:
+            x0, y0, x1, y1 = [float(v) for v in det.box]
             x0i, y0i = int(max(0, x0)), int(max(0, y0))
             x1i, y1i = int(min(w, x1)), int(min(h, y1))
             if x1i - x0i < 2 or y1i - y0i < 2:
@@ -382,23 +416,48 @@ class OwlSamService:
                 mask, iou, _ = self._sam.predict(
                     np.array([[x0i, y0i], [x1i, y1i]]), np.array([2, 3]))
             except Exception as e:
-                logger.warning(f"SAM predict failed for track {tid}: {e}")
+                logger.warning(f"SAM predict failed: {e}")
                 continue
             mask_bool = self._pick_best_mask(mask, iou, (h, w))
             if mask_bool is None:
                 continue
-            prev = self._track_masks.get(tid)
+            tid = self._match_track_id(det.box, tboxes)   # borrow a track id if one overlaps
+            if tid is None:
+                synthetic -= 1
+                tid = synthetic           # untracked this frame → no coasting, neutral color
+            prev = self._track_masks.get(tid) if tid >= 0 else None
             if prev is not None and (now - prev["t"]) > 1e-3:
                 vel = np.clip((center - prev["center"]) / (now - prev["t"]), -600.0, 600.0)
             else:
                 vel = np.zeros(2)
             new_state[tid] = {"mask": mask_bool, "center": center, "vel": vel,
-                              "t": now, "color": _color(tid)}
+                              "t": now, "color": _color(tid if tid >= 0 else 0)}
         self._track_masks = new_state   # atomic swap; overlay_live() reads this on the event loop
 
         bgr = self._blend_track_masks(bgr, new_state, now)   # render this (inference) frame
         return bgr, (f"Tracking+SAM: {len(new_state)} object(s)"
                      if new_state else f"No matches for {self.prompt}")
+
+    @staticmethod
+    def _match_track_id(box, tboxes, iou_thresh=0.3):
+        """Return the track id of the best-IoU tracked box (>= iou_thresh), else None."""
+        if not tboxes:
+            return None
+        bx0, by0, bx1, by1 = [float(v) for v in box]
+        a1 = max(0.0, bx1 - bx0) * max(0.0, by1 - by0)
+        best_id, best_iou = None, iou_thresh
+        for tid, tb in tboxes:
+            tx0, ty0, tx1, ty1 = [float(v) for v in tb]
+            iw = max(0.0, min(bx1, tx1) - max(bx0, tx0))
+            ih = max(0.0, min(by1, ty1) - max(by0, ty0))
+            inter = iw * ih
+            if inter <= 0:
+                continue
+            union = a1 + max(0.0, tx1 - tx0) * max(0.0, ty1 - ty0) - inter
+            iou = inter / union if union > 0 else 0.0
+            if iou > best_iou:
+                best_iou, best_id = iou, tid
+        return best_id
 
     def _blend_track_masks(self, frame_bgr, state, now):
         """Alpha-blend each track's mask onto frame, shifted by velocity × time-since-inference so
