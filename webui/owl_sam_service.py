@@ -61,8 +61,10 @@ _MEM_LOG_EVERY = int(os.environ.get("SAM_MEM_LOG_EVERY", "20"))
 MODE_OWL_SAM = "nanoowl+nanosam"      # OWL detect → SAM segment per box
 MODE_OWL_ONLY = "nanoowl"             # OWL detect → boxes only (skip SAM)
 MODE_OWL_TRACK = "nanoowl+bytetrack"  # OWL detect → ByteTrack → boxes with stable IDs
+MODE_TRACK_SAM = "nanoowl+bytetrack+nanosam"  # OWL → ByteTrack → SAM: mask-only, per-track color,
+                                              # motion-shifted between inferences (no box/ID drawn)
 MODE_SAM_ONLY = "nanosam"             # SAM full-frame box prompt (skip OWL) — diagnostic, not in UI
-VALID_MODES = {MODE_OWL_SAM, MODE_OWL_ONLY, MODE_OWL_TRACK, MODE_SAM_ONLY}
+VALID_MODES = {MODE_OWL_SAM, MODE_OWL_ONLY, MODE_OWL_TRACK, MODE_TRACK_SAM, MODE_SAM_ONLY}
 
 
 class OwlSamService:
@@ -79,8 +81,8 @@ class OwlSamService:
         owl_model_name: str = "google/owlvit-base-patch32",
         # The next args exist only so server.py's VLMService(model=..., api_base=...)
         # call sites can reach us without changes. `model` doubles as the mode selector.
-        # Default to OWL-only — most reliable mode; users can switch to combined in the UI.
-        model: str = MODE_OWL_ONLY,
+        # Default to OWL+SAM (masks) — the headline demo; users switch modes in the UI.
+        model: str = MODE_OWL_SAM,
         api_base: str = "local",
         api_key: str = "N/A",
         max_tokens: int = 0,
@@ -118,6 +120,12 @@ class OwlSamService:
         self._sam = None
         self._tracker = None            # supervision.ByteTrack, created on first use in track mode
         self._tracker_unavailable = False
+        # For MODE_TRACK_SAM: per-track {mask_bool, center, vel_px_per_s, t, color}. Updated on
+        # inference frames; read (and motion-shifted) every display frame by overlay_live().
+        self._track_masks = {}
+        # For MODE_OWL_TRACK: per-track {box, center, vel, t, color} — lets the display coast
+        # the boxes onto the live frame between inferences (smooth video, no freeze).
+        self._track_boxes = {}
         self._tree = None
         self._clip_enc = None
         self._owl_enc = None
@@ -245,6 +253,14 @@ class OwlSamService:
                 return self._track_and_draw(bgr, output)
             # supervision missing -> fall through to plain boxes below
 
+        # Track + SAM mode: tracker IDs → SAM mask per tracked box, stored for motion-shifted
+        # live overlay. Render mask-only (no box/ID). Needs both tracker and SAM.
+        if self._mode == MODE_TRACK_SAM:
+            self._ensure_tracker()
+            if self._tracker is not None and self._sam is not None:
+                return self._run_track_sam(pil_image, bgr, output, h, w)
+            # missing tracker or SAM -> fall through (boxes / masks as available)
+
         if (
             self._mode == MODE_OWL_SAM
             and self._sam is not None
@@ -290,18 +306,139 @@ class OwlSamService:
         else:
             sv_det = sv.Detections.empty()
         tracked = self._tracker.update_with_detections(sv_det)
-        ids = []
+
+        now = time.time()
+        new_boxes = {}
         for i in range(len(tracked)):
-            x0, y0, x1, y1 = [int(v) for v in tracked.xyxy[i]]
+            x0, y0, x1, y1 = [float(v) for v in tracked.xyxy[i]]
             tid = int(tracked.tracker_id[i]) if tracked.tracker_id is not None else i
-            ids.append(tid)
-            col = _color(tid)
-            cv2.rectangle(bgr, (max(0, x0), max(0, y0)), (min(w, x1), min(h, y1)), col, 2)
-            cv2.putText(bgr, f"#{tid}", (x0 + 4, max(16, y0 + 20)),
+            center = np.array([(x0 + x1) / 2.0, (y0 + y1) / 2.0])
+            prev = self._track_boxes.get(tid)
+            if prev is not None and (now - prev["t"]) > 1e-3:
+                vel = np.clip((center - prev["center"]) / (now - prev["t"]), -600.0, 600.0)
+            else:
+                vel = np.zeros(2)
+            new_boxes[tid] = {"box": np.array([x0, y0, x1, y1]), "center": center,
+                              "vel": vel, "t": now, "color": _color(tid)}
+        self._track_boxes = new_boxes   # atomic swap; overlay_live() coasts these on the event loop
+
+        bgr = self._draw_track_boxes(bgr, new_boxes, now)
+        return bgr, (f"Tracking {len(new_boxes)} — IDs {sorted(new_boxes.keys())}"
+                     if new_boxes else f"No matches for {self.prompt}")
+
+    def _draw_track_boxes(self, frame_bgr, state, now):
+        """Draw each track's box + #id, coasted by velocity × time-since-inference so the box
+        follows the object between inferences (smooth). Modifies frame_bgr in place."""
+        h, w = frame_bgr.shape[:2]
+        for tid, s in state.items():
+            elapsed = now - s["t"]
+            if elapsed > 1.0:
+                continue
+            dx, dy = s["vel"] * elapsed
+            x0, y0, x1, y1 = s["box"] + np.array([dx, dy, dx, dy])
+            x0i, y0i = int(max(0, x0)), int(max(0, y0))
+            x1i, y1i = int(min(w, x1)), int(min(h, y1))
+            if x1i - x0i < 2 or y1i - y0i < 2:
+                continue
+            col = s["color"]
+            cv2.rectangle(frame_bgr, (x0i, y0i), (x1i, y1i), col, 2)
+            cv2.putText(frame_bgr, f"#{tid}", (x0i + 4, max(16, y0i + 20)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
-        summary = (f"Tracking {len(tracked)} — IDs {sorted(ids)}"
-                   if ids else f"No matches for {self.prompt}")
-        return bgr, summary
+        return frame_bgr
+
+    # ---- MODE_TRACK_SAM: OWL → ByteTrack → SAM, mask-only, motion-shifted ----
+    def _run_track_sam(self, pil_image, bgr, output, h, w):
+        """Track the OWL detections, segment each tracked box with SAM, and store per-track masks
+        (+ velocity) so the display can motion-shift them between inferences. Renders mask-only
+        (colored per track id; no box, no ID text)."""
+        import supervision as sv
+        dets = output.detections
+        if dets:
+            boxes = np.array([d.box for d in dets], dtype=float)
+            scores = np.array([max(d.scores) if d.scores else 0.5 for d in dets], dtype=float)
+            class_id = np.array([d.labels[0] if d.labels else 0 for d in dets], dtype=int)
+            sv_det = sv.Detections(xyxy=boxes, confidence=scores, class_id=class_id)
+        else:
+            sv_det = sv.Detections.empty()
+        tracked = self._tracker.update_with_detections(sv_det)
+
+        now = time.time()
+        try:
+            self._sam.set_image(pil_image)
+        except Exception as e:
+            logger.warning(f"SAM set_image failed: {e}")
+            return bgr, "SAM set_image failed"
+
+        new_state = {}
+        for i in range(len(tracked)):
+            tid = int(tracked.tracker_id[i]) if tracked.tracker_id is not None else i
+            x0, y0, x1, y1 = [float(v) for v in tracked.xyxy[i]]
+            x0i, y0i = int(max(0, x0)), int(max(0, y0))
+            x1i, y1i = int(min(w, x1)), int(min(h, y1))
+            if x1i - x0i < 2 or y1i - y0i < 2:
+                continue
+            center = np.array([(x0 + x1) / 2.0, (y0 + y1) / 2.0])
+            try:
+                mask, iou, _ = self._sam.predict(
+                    np.array([[x0i, y0i], [x1i, y1i]]), np.array([2, 3]))
+            except Exception as e:
+                logger.warning(f"SAM predict failed for track {tid}: {e}")
+                continue
+            mask_bool = self._pick_best_mask(mask, iou, (h, w))
+            if mask_bool is None:
+                continue
+            prev = self._track_masks.get(tid)
+            if prev is not None and (now - prev["t"]) > 1e-3:
+                vel = np.clip((center - prev["center"]) / (now - prev["t"]), -600.0, 600.0)
+            else:
+                vel = np.zeros(2)
+            new_state[tid] = {"mask": mask_bool, "center": center, "vel": vel,
+                              "t": now, "color": _color(tid)}
+        self._track_masks = new_state   # atomic swap; overlay_live() reads this on the event loop
+
+        bgr = self._blend_track_masks(bgr, new_state, now)   # render this (inference) frame
+        return bgr, (f"Tracking+SAM: {len(new_state)} object(s)"
+                     if new_state else f"No matches for {self.prompt}")
+
+    def _blend_track_masks(self, frame_bgr, state, now):
+        """Alpha-blend each track's mask onto frame, shifted by velocity × time-since-inference so
+        the mask follows the moving object between SAM runs (shape stale, position tracks)."""
+        if not state:
+            return frame_bgr
+        h, w = frame_bgr.shape[:2]
+        overlay = frame_bgr.copy()
+        drew = False
+        for tid, s in state.items():
+            elapsed = now - s["t"]
+            if elapsed > 1.0:            # too stale to trust the extrapolation — skip
+                continue
+            m = s["mask"]
+            dx, dy = s["vel"] * elapsed
+            if abs(dx) >= 1 or abs(dy) >= 1:
+                M = np.float32([[1, 0, float(dx)], [0, 1, float(dy)]])
+                m = cv2.warpAffine(m.astype(np.uint8), M, (w, h),
+                                   flags=cv2.INTER_NEAREST) > 0
+            overlay[m] = s["color"]
+            drew = True
+        if not drew:
+            return frame_bgr
+        return cv2.addWeighted(overlay, self.mask_alpha, frame_bgr, 1 - self.mask_alpha, 0)
+
+    # ---- Live-overlay hook (video_processor uses these for MODE_TRACK_SAM) ----
+    def wants_live_overlay(self) -> bool:
+        """True → overlay onto the LIVE frame every frame (smooth video with coasted boxes /
+        motion-shifted masks) instead of freezing on the last baked annotation."""
+        return self._mode in (MODE_OWL_TRACK, MODE_TRACK_SAM)
+
+    def overlay_live(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """Draw the current tracked overlay — coasted boxes (OWL_TRACK) or motion-shifted masks
+        (TRACK_SAM) — onto the given live frame, extrapolated to 'now'."""
+        now = time.time()
+        if self._mode == MODE_TRACK_SAM:
+            return self._blend_track_masks(frame_bgr, self._track_masks, now)
+        if self._mode == MODE_OWL_TRACK:
+            return self._draw_track_boxes(frame_bgr.copy(), self._track_boxes, now)
+        return frame_bgr
 
     def _strip_root_detections(self, detections):
         """Remove detections whose label resolves to the implicit root "image" node.

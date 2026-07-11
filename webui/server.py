@@ -235,11 +235,12 @@ async def models(request):
     """Three diagnostic modes exposed as "models" so the existing UI dropdown drives them.
     OWL-only is listed first because it's the default and most reliable mode."""
     options = [
-        {"id": "nanoowl",           "name": "NanoOWL only (boxes)"},
-        {"id": "nanoowl+bytetrack", "name": "NanoOWL + ByteTrack (tracked IDs)"},
-        {"id": "nanoowl+nanosam",   "name": "NanoOWL + NanoSAM (box → mask)"},
+        {"id": "nanoowl",                     "name": "NanoOWL only (boxes)"},
+        {"id": "nanoowl+bytetrack",           "name": "NanoOWL + ByteTrack (tracked IDs)"},
+        {"id": "nanoowl+nanosam",             "name": "NanoOWL + NanoSAM (box → mask)"},
+        {"id": "nanoowl+bytetrack+nanosam",   "name": "NanoOWL + ByteTrack + NanoSAM (tracked masks)"},
     ]
-    current = "nanoowl"
+    current = "nanoowl+nanosam"
     if sessions.get("default"):
         current = getattr(sessions["default"]["vlm_service"], "model", current)
     for o in options:

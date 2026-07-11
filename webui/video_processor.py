@@ -261,6 +261,22 @@ class VideoProcessorTrack(VideoStreamTrack):
             if self.text_callback:
                 self.text_callback(response, metrics)
 
+            # MODE_TRACK_SAM: draw motion-shifted masks onto the LIVE frame every frame, so the
+            # video plays at full fps with masks that follow the object between inferences —
+            # instead of freezing on the last baked annotation.
+            if (hasattr(self.vlm_service, "wants_live_overlay")
+                    and self.vlm_service.wants_live_overlay()):
+                try:
+                    live_bgr = frame.to_ndarray(format="bgr24")
+                    out = self.vlm_service.overlay_live(live_bgr)
+                    new_frame = av.VideoFrame.from_ndarray(out, format="bgr24")
+                    new_frame.pts = frame.pts
+                    new_frame.time_base = frame.time_base
+                    return new_frame
+                except Exception as e:
+                    logger.warning(f"Live overlay failed: {e}")
+                    return frame
+
             # If the inference service has produced an annotated frame (NanoOWL boxes
             # + NanoSAM masks baked in), swap it in so the browser sees the overlay.
             # While SAM is still warming up (first inference pending), fall through to

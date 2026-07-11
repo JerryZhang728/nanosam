@@ -59,10 +59,20 @@ to build the OWL engine, generate the test video, patch the demo, and launch the
       • Perf note: the visible "lag" is `process_every` (boxes refresh only every Nth frame), NOT
         frame-dropping (that's off, `max_frame_latency=0`). Sweet spot N ≈ source_fps × inference_time
         (OWL/ByteTrack ~170ms→N≈3; OWL+SAM ~365ms→N≈5-6). Still inference-rate-limited between frames.
-- [ ] **NEXT: 4th mode `nanoowl+bytetrack+nanosam`** — OWL→ByteTrack→SAM (tracked + segmented), mask-only
-      render (no box/ID), option (b) motion-shifted mask (translate last mask by tracker delta between
-      inferences so it follows the object; shape stale, position tracks). Masks can't coast like boxes —
-      SAM must re-run — so between inferences only the box coasts, not the mask.
+- [x] **4th mode `nanoowl+bytetrack+nanosam` (2026-07-11)** — OWL→ByteTrack→SAM, **mask-only** (no
+      box/ID), colored per track. Option (b) motion-shift: between inferences the mask is translated by
+      the tracker's velocity so it follows the object (shape stale → a faint "shadow" trail; accepted).
+- [x] **Live overlay (no more freeze between inferences).** Both track modes now draw onto the LIVE
+      frame every display frame (video plays at full fps) instead of returning the frozen baked
+      annotation. `owl_sam_service.wants_live_overlay()` + `overlay_live()`; `video_processor.recv()`
+      calls it for these modes. `nanoowl+bytetrack` **coasts the boxes** (clean, no shadow);
+      `nanoowl+bytetrack+nanosam` motion-shifts masks. Per-track velocity from center delta between
+      inferences, clamped ±600 px/s, dropped after 1s stale. The non-track modes keep the baked path.
+- [x] **UI defaults:** source tab → **Video**, model → **NanoOWL+NanoSAM** (OwlSamService default model
+      = MODE_OWL_SAM; models() fallback = nanoowl+nanosam; index.html active tab + panel).
+- [ ] **Perf note / knobs:** "lag" = boxes/masks refresh only at inference rate; not frame-drop
+      (`max_frame_latency=0`). N ≈ source_fps × inference_time (OWL/ByteTrack ~170ms→3; +SAM ~365ms→5-6).
+      Once inference-bound, lower N just skips dispatches (`_processing_lock`), doesn't help.
 - [ ] **AOI logic** (ROI per slot, presence/count, PASS/FAIL + MISSING/MISPLACED overlay).
 - [ ] **AOI logic** (ROI per slot, presence/count, PASS/FAIL + MISSING/MISPLACED overlay).
 - [ ] (Optional) SAM → VLM chain.

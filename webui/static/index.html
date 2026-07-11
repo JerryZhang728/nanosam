@@ -2277,11 +2277,11 @@ After commands, explain: obstacles detected, clearance margins, goal inference, 
                             <i data-lucide="cast" style="width: 14px; height: 14px; margin-right: 4px;"></i>
                             IP Cam
                         </button>
-                        <button class="input-source-tab active" data-source="image" title="Local image file or folder (slideshow)">
+                        <button class="input-source-tab" data-source="image" title="Local image file or folder (slideshow)">
                             <i data-lucide="image" style="width: 14px; height: 14px; margin-right: 4px;"></i>
                             Image
                         </button>
-                        <button class="input-source-tab" data-source="video" title="Local video file">
+                        <button class="input-source-tab active" data-source="video" title="Local video file">
                             <i data-lucide="film" style="width: 14px; height: 14px; margin-right: 4px;"></i>
                             Video
                         </button>
@@ -2322,7 +2322,7 @@ After commands, explain: obstacles detected, clearance margins, goal inference, 
                     </div>
 
                     <!-- Image Controls (single file OR folder slideshow) -->
-                    <div id="imageControls">
+                    <div id="imageControls" style="display: none;">
                         <div class="form-group">
                             <label for="localImagePath">Image File or Folder Path</label>
                             <div style="display: flex; gap: 6px; margin-bottom: 8px;">
@@ -2342,7 +2342,7 @@ After commands, explain: obstacles detected, clearance margins, goal inference, 
                     </div>
 
                     <!-- Video Controls (local video file) -->
-                    <div id="videoControls" style="display: none;">
+                    <div id="videoControls">
                         <div class="form-group">
                             <label for="localVideoPath">Video File Path</label>
                             <div style="display: flex; gap: 6px; margin-bottom: 8px;">
