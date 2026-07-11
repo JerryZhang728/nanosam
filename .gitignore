@@ -15,3 +15,8 @@ log
 *.log
 webui.bak/
 .claude/settings.local.json
+
+# Exception to the *.mp4 rule above: bundle the demo clip(s) under videos/ so the UI's
+# default /data/videos source is never empty on a fresh clone. (These add ~31MB to the repo.)
+!videos/
+!videos/*.mp4

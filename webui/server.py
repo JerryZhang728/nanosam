@@ -235,9 +235,9 @@ async def models(request):
     """Three diagnostic modes exposed as "models" so the existing UI dropdown drives them.
     OWL-only is listed first because it's the default and most reliable mode."""
     options = [
-        {"id": "nanoowl",         "name": "NanoOWL only (boxes, skip SAM)"},
-        {"id": "nanoowl+nanosam", "name": "NanoOWL + NanoSAM (box → mask)"},
-        {"id": "nanosam",         "name": "NanoSAM only (full-frame box, skip OWL)"},
+        {"id": "nanoowl",           "name": "NanoOWL only (boxes)"},
+        {"id": "nanoowl+bytetrack", "name": "NanoOWL + ByteTrack (tracked IDs)"},
+        {"id": "nanoowl+nanosam",   "name": "NanoOWL + NanoSAM (box → mask)"},
     ]
     current = "nanoowl"
     if sessions.get("default"):
@@ -1123,6 +1123,16 @@ async def create_app(test_mode=False):
         logger.info(f"Serving favicon files from: {favicon_dir}")
     else:
         logger.warning(f"⚠️  Favicon directory not found: {favicon_dir}")
+
+    # Serve vendored JS libs (lucide/marked/dompurify) locally so the UI works with NO
+    # internet — the Jetson can't reach unpkg/jsdelivr, and those were synchronous <script>
+    # tags that otherwise hang the page's load event (dropdown stuck on "Loading models...").
+    vendor_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "static", "vendor"))
+    if os.path.exists(vendor_dir):
+        app.router.add_static("/vendor", vendor_dir, name="vendor")
+        logger.info(f"Serving vendored JS from: {vendor_dir}")
+    else:
+        logger.warning(f"⚠️  Vendor directory not found: {vendor_dir}")
 
     if not test_mode:
         app.on_startup.append(on_startup)

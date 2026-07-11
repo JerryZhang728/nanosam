@@ -42,10 +42,28 @@ to build the OWL engine, generate the test video, patch the demo, and launch the
       Test feed dwell is controlled by FRAMES_PER_IMG in make_test_video.py (demo ignores video FPS).
 - [x] **NanoSAM** mask overlay — verified live on Jetson (engines built, tree_demo at :7860 draws
       colored masks under OWL boxes). The patched `tree_demo` is now the **legacy fallback**.
-- [~] **ConanAI SAM WebUI** (`webui/`) — fork of live-vlm-webui swapping VLMService → OwlSamService.
+- [x] **ConanAI SAM WebUI** (`webui/`) — fork of live-vlm-webui swapping VLMService → OwlSamService.
       WebRTC + aiohttp + NVIDIA dark theme reused; in-process NanoOWL + NanoSAM inference returns
       annotated frames that VideoProcessorTrack swaps into the outgoing track. Runs on `:7860`
-      (HTTPS, self-signed cert). **Awaiting first launch on Jetson — verify next.**
+      (HTTPS, self-signed cert). **VERIFIED live on the 2nd Jetson (192.168.8.6).**
+- [x] **STABLE BASELINE (2026-07-11) — 3 selectable modes + offline UI.** This is a known-good rollback
+      point (git tag `stable-3modes`). What's in it:
+      • Model dropdown drives 3 modes: `nanoowl` (boxes), `nanoowl+bytetrack` (stable IDs, NEW),
+        `nanoowl+nanosam` (masks). ByteTrack via `supervision` (installed `--no-deps` in
+        install_webui.sh so it can't clobber the CUDA cv2 — that caused a native `double free`).
+      • **Offline UI fix:** lucide/marked/dompurify were CDN `<script>` tags; the Jetson can't reach
+        unpkg/jsdelivr, so the page's load event hung → dropdown stuck on "Loading models...". Vendored
+        all three under `webui/static/vendor/` + added a `/vendor` static route. UI now needs no internet.
+      • Sample clip `videos/person on railtrack.mp4` bundled; `run_demo.sh` seeds `/data/videos`.
+      • README clones straight to `~/Public/nanosam` (setup_host relocation is a no-op when already there).
+      • Perf note: the visible "lag" is `process_every` (boxes refresh only every Nth frame), NOT
+        frame-dropping (that's off, `max_frame_latency=0`). Sweet spot N ≈ source_fps × inference_time
+        (OWL/ByteTrack ~170ms→N≈3; OWL+SAM ~365ms→N≈5-6). Still inference-rate-limited between frames.
+- [ ] **NEXT: 4th mode `nanoowl+bytetrack+nanosam`** — OWL→ByteTrack→SAM (tracked + segmented), mask-only
+      render (no box/ID), option (b) motion-shifted mask (translate last mask by tracker delta between
+      inferences so it follows the object; shape stale, position tracks). Masks can't coast like boxes —
+      SAM must re-run — so between inferences only the box coasts, not the mask.
+- [ ] **AOI logic** (ROI per slot, presence/count, PASS/FAIL + MISSING/MISPLACED overlay).
 - [ ] **AOI logic** (ROI per slot, presence/count, PASS/FAIL + MISSING/MISPLACED overlay).
 - [ ] (Optional) SAM → VLM chain.
 - [ ] Booth polish: lighting, USB camera (`--camera 0`), fullscreen UI, pitch script.

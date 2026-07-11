@@ -57,11 +57,12 @@ _EMPTY_CACHE_EVERY = int(os.environ.get("SAM_EMPTY_CACHE_EVERY", "0"))
 _MEM_LOG_EVERY = int(os.environ.get("SAM_MEM_LOG_EVERY", "20"))
 
 
-# Diagnostic modes — selected via the model dropdown in the UI.
-MODE_OWL_SAM = "nanoowl+nanosam"   # default: OWL detect → SAM segment per box
-MODE_OWL_ONLY = "nanoowl"          # OWL detect → boxes only (skip SAM)
-MODE_SAM_ONLY = "nanosam"          # SAM full-frame box prompt (skip OWL)
-VALID_MODES = {MODE_OWL_SAM, MODE_OWL_ONLY, MODE_SAM_ONLY}
+# Modes — selected via the model dropdown in the UI.
+MODE_OWL_SAM = "nanoowl+nanosam"      # OWL detect → SAM segment per box
+MODE_OWL_ONLY = "nanoowl"             # OWL detect → boxes only (skip SAM)
+MODE_OWL_TRACK = "nanoowl+bytetrack"  # OWL detect → ByteTrack → boxes with stable IDs
+MODE_SAM_ONLY = "nanosam"             # SAM full-frame box prompt (skip OWL) — diagnostic, not in UI
+VALID_MODES = {MODE_OWL_SAM, MODE_OWL_ONLY, MODE_OWL_TRACK, MODE_SAM_ONLY}
 
 
 class OwlSamService:
@@ -115,6 +116,8 @@ class OwlSamService:
         # Lazily-initialized predictors (loading TRT engines takes seconds)
         self._owl = None
         self._sam = None
+        self._tracker = None            # supervision.ByteTrack, created on first use in track mode
+        self._tracker_unavailable = False
         self._tree = None
         self._clip_enc = None
         self._owl_enc = None
@@ -235,6 +238,13 @@ class OwlSamService:
         # Strip the implicit root "image" detection (covers the whole frame, score 1.0).
         output.detections = self._strip_root_detections(output.detections)
 
+        # ByteTrack mode: assign stable IDs across frames, draw our own labelled boxes.
+        if self._mode == MODE_OWL_TRACK:
+            self._ensure_tracker()
+            if self._tracker is not None:
+                return self._track_and_draw(bgr, output)
+            # supervision missing -> fall through to plain boxes below
+
         if (
             self._mode == MODE_OWL_SAM
             and self._sam is not None
@@ -244,6 +254,54 @@ class OwlSamService:
 
         bgr = draw_tree_output(bgr, output, self._tree)
         return bgr, self._owl_summary(output)
+
+    def _ensure_tracker(self):
+        """Lazily create a supervision ByteTrack (param names vary across sv versions)."""
+        if self._tracker is not None or self._tracker_unavailable:
+            return
+        try:
+            import supervision as sv
+            try:
+                self._tracker = sv.ByteTrack(
+                    track_activation_threshold=self.owl_threshold,
+                    lost_track_buffer=30, frame_rate=30, minimum_consecutive_frames=1,
+                )
+            except TypeError:  # older supervision API
+                self._tracker = sv.ByteTrack(track_thresh=self.owl_threshold,
+                                             track_buffer=30, frame_rate=30)
+            logger.info("ByteTrack ready.")
+        except Exception as e:
+            logger.warning(f"ByteTrack unavailable (supervision not installed?) — "
+                           f"track mode falls back to plain boxes: {e}")
+            self._tracker_unavailable = True
+
+    def _track_and_draw(self, bgr, output):
+        """Run OWL detections through ByteTrack; draw boxes labelled with stable IDs.
+        ByteTrack bridges frames where the detector drops out and suppresses 1-frame flicker
+        (its low-confidence second-association pass), so IDs stay stable on moving objects."""
+        import supervision as sv
+        dets = output.detections
+        h, w = bgr.shape[:2]
+        if dets:
+            boxes = np.array([d.box for d in dets], dtype=float)
+            scores = np.array([max(d.scores) if d.scores else 0.5 for d in dets], dtype=float)
+            class_id = np.array([d.labels[0] if d.labels else 0 for d in dets], dtype=int)
+            sv_det = sv.Detections(xyxy=boxes, confidence=scores, class_id=class_id)
+        else:
+            sv_det = sv.Detections.empty()
+        tracked = self._tracker.update_with_detections(sv_det)
+        ids = []
+        for i in range(len(tracked)):
+            x0, y0, x1, y1 = [int(v) for v in tracked.xyxy[i]]
+            tid = int(tracked.tracker_id[i]) if tracked.tracker_id is not None else i
+            ids.append(tid)
+            col = _color(tid)
+            cv2.rectangle(bgr, (max(0, x0), max(0, y0)), (min(w, x1), min(h, y1)), col, 2)
+            cv2.putText(bgr, f"#{tid}", (x0 + 4, max(16, y0 + 20)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2, cv2.LINE_AA)
+        summary = (f"Tracking {len(tracked)} — IDs {sorted(ids)}"
+                   if ids else f"No matches for {self.prompt}")
+        return bgr, summary
 
     def _strip_root_detections(self, detections):
         """Remove detections whose label resolves to the implicit root "image" node.

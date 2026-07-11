@@ -21,5 +21,17 @@ python3 -c "import jtop" 2>/dev/null || \
     python3 -m pip install --index-url https://pypi.org/simple jetson-stats || \
     echo "(jetson-stats install failed — GPU monitor will be limited)"
 
+# supervision => ByteTrack, for the "NanoOWL + ByteTrack" mode. Install --no-deps: the image
+# already has a CUDA-built cv2 and numpy 1.x; supervision's default deps pull a preview
+# opencv/numpy2 that clobbers them (native "double free" at runtime). scipy + the small pure
+# deps below are safe. If this fails, OwlSamService just falls back to plain boxes.
+if ! python3 -c "import supervision" 2>/dev/null; then
+    python3 -m pip install --index-url https://pypi.org/simple --no-deps "supervision==0.29.1" \
+      && python3 -m pip install --index-url https://pypi.org/simple scipy defusedxml "pydeprecate<0.10" \
+      || echo "(supervision install failed — NanoOWL+ByteTrack falls back to plain boxes)"
+fi
+
 echo "== verify imports =="
 python3 -c "import aiortc, av, aiohttp_cors; print('webui deps OK')"
+python3 -c "import supervision; print('supervision (ByteTrack) OK', supervision.__version__)" \
+    || echo "(supervision not importable — ByteTrack mode will fall back to plain boxes)"

@@ -42,6 +42,11 @@ cp "$REPO"/scripts/* "$JC/data/scripts/"
 rm -rf "$JC/data/webui" 2>/dev/null || sudo rm -rf "$JC/data/webui"
 cp -r "$REPO/webui" "$JC/data/"
 
+# Ensure the dir the UI file-browser defaults to (/data/videos) always exists, and seed it
+# with the repo's sample clip(s). -n so we never clobber videos the user dropped in there.
+mkdir -p "$JC/data/videos"
+[ -d "$REPO/videos" ] && cp -rn "$REPO"/videos/* "$JC/data/videos/" 2>/dev/null || true
+
 cd "$JC"
 TAG="$(./autotag nanoowl)"           # diagnostics go to stderr; only the tag on stdout
 echo "== sam-demo: launching $TAG → container_setup.sh (web UI on :7860) =="
