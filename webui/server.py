@@ -77,9 +77,16 @@ def get_or_create_session(session_id: str):
     engine/model choices that main() set up — otherwise we silently fall back to
     constructor defaults and get model/engine geometry mismatches."""
     if session_id not in sessions:
-        cfg = default_vlm_config
-        sessions[session_id] = {
-            "vlm_service": OwlSamService(
+        # SHARED model backend: every session reuses the ONE global OwlSamService, so the OWL+SAM
+        # TensorRT engines load exactly once. Previously each session_id built its OWN OwlSamService,
+        # and each lazily loaded ~1GB of OWL+SAM onto the GPU that was never freed — so reloading /
+        # reconnecting the page a handful of times stacked the copies (6 reloads -> ~6GB torch ->
+        # ~14.7GB total -> near OOM). This is a single-user booth demo, so one shared prompt/mode is
+        # fine; the _processing_lock inside the service already serializes overlapping inference.
+        global vlm_service
+        if vlm_service is None:
+            cfg = default_vlm_config
+            vlm_service = OwlSamService(
                 owl_engine=cfg.get("owl_engine", "/data/owl_image_encoder_patch32.engine"),
                 sam_image_encoder_engine=cfg.get(
                     "sam_image_encoder_engine", "/data/nanosam/data/resnet18_image_encoder.engine"
@@ -91,11 +98,13 @@ def get_or_create_session(session_id: str):
                 mask_alpha=cfg.get("mask_alpha", 0.5),
                 owl_threshold=cfg.get("owl_threshold", 0.1),
                 owl_model_name=cfg.get("owl_model_name", "google/owlvit-base-patch32"),
-            ),
+            )
+        sessions[session_id] = {
+            "vlm_service": vlm_service,       # shared — do NOT construct a new one per session
             "show_request_payload": False,
             "show_response_payload": False,
         }
-        logger.info(f"Created new session: {session_id}")
+        logger.info(f"Created session {session_id} (shared model backend)")
     return sessions[session_id]
 
 
