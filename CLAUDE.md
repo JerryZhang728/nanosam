@@ -78,6 +78,12 @@ to build the OWL engine, generate the test video, patch the demo, and launch the
       objects that move SLOWLY relative to the (slow) inference rate — stable ids, smooth coasting. On
       FAST/erratic subjects it can't associate, so a +bytetrack mode degrades to ~= its plain twin.
       Rule of thumb: SLOW subject → use a +bytetrack mode; FAST subject → plain nanoowl / nanoowl+nanosam.
+      Rollback tag for this state: `v3-decoupled`.
+- [x] **Shared global model backend (2026-07-12) — tag `v4-shared-models`, current head.** Fixed a slow
+      RAM/VRAM ramp (to ~14.7GB over 8h+): `get_or_create_session()` was building a fresh `OwlSamService`
+      per WebRTC session, reloading both models on every reconnect/reload. Now one global `vlm_service`
+      is built once and shared by all sessions (models load once per process). Verify with
+      `docker logs nanosam_webui | grep -c 'Loading NanoOWL'` == 1 across reloads. See Gotchas.
 - [ ] **Perf note / knobs:** "lag" = boxes/masks refresh only at inference rate; not frame-drop
       (`max_frame_latency=0`). N ≈ source_fps × inference_time (OWL/ByteTrack ~170ms→3; +SAM ~365ms→5-6).
       Once inference-bound, lower N just skips dispatches (`_processing_lock`), doesn't help.
@@ -98,6 +104,16 @@ to build the OWL engine, generate the test video, patch the demo, and launch the
   across hundreds of inferences while total RAM ran to 14.8GB → the leak was entirely outside PyTorch.
   Lesson: a timed OOM under live video is almost always frame-buffer backpressure, not the model. TOPS
   is irrelevant (that shows as low FPS, never a timed stop).
+- **SECOND VRAM/RAM leak — slow ramp over hours (FIXED — per-session model duplication).** Distinct from
+  the WebRTC one above: this one ramps over HOURS, not ~1 min. Symptom: RAM crept to ~14.7GB across an
+  8h+ run. **Root cause:** `server.py get_or_create_session()` built a NEW `OwlSamService` for every
+  WebRTC session, so every browser reconnect / page reload reloaded NanoOWL + NanoSAM into memory and
+  never freed the old set. **Proof:** `torch_alloc` stepped 1->3->6GB, `inf#` reset to 0 several times,
+  and "Loading NanoOWL" appeared 6x across ~26 connects. **Fix (tag `v4-shared-models`):** one global
+  `vlm_service`; `get_or_create_session()` builds it once and every session reuses it — models load
+  exactly once per process. **Verify:** `docker logs nanosam_webui | grep -c 'Loading NanoOWL'` stays at
+  1 no matter how many reloads; the reliability monitor's `model_loads` must not climb. (Baseline-idle
+  with no stream is ~5GB and `model_loads=0` because models load lazily — stream + reload to exercise it.)
 - Secondary/defensive (kept, but were NOT the leak): `_run_inference` runs under `torch.inference_mode()`
   (good hygiene; neither NanoOWL nor NanoSAM wraps its own forwards). `SAM_EMPTY_CACHE_EVERY` /
   `SAM_MEM_LOG_EVERY` env knobs remain for diagnostics; empty_cache defaults OFF (torch wasn't leaking).
