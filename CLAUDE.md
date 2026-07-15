@@ -130,6 +130,9 @@ to build the OWL engine, generate the test video, patch the demo, and launch the
   **Fix:** `setup_host.sh` step **[6/6]** now installs jetson-stats system-wide and
   enables/starts `jtop.service` on the host (mirrors the vlm project's fix). Verify on host:
   `systemctl is-active jtop.service` and `ls -l /run/jtop.sock`.
+  **Also (self-heal):** `container/run_demo.sh` now starts `jtop.service` and waits for
+  `/run/jtop.sock` BEFORE launching the container, so the panel works even after a reboot
+  (the socket must exist before `jetson-containers run`, which only mounts it if present).
 - **Repo location is self-correcting.** `setup_host.sh` relocates the checkout to
   `~/Public/nanosam` if it was cloned elsewhere (e.g. `~/nanosam`), so nanosam and the shared
   `~/Public/jetson-containers` always end up side-by-side under `~/Public`.

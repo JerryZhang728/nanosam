@@ -47,6 +47,25 @@ cp -r "$REPO/webui" "$JC/data/"
 mkdir -p "$JC/data/videos"
 [ -d "$REPO/videos" ] && cp -rn "$REPO"/videos/* "$JC/data/videos/" 2>/dev/null || true
 
+# Ensure the host jtop.service is up so /run/jtop.sock EXISTS before the container starts.
+# jetson-containers only adds "-v /run/jtop.sock:/run/jtop.sock" when the socket already
+# exists, so without this the web UI's GPU/VRAM/CPU panel stays empty (typically after a
+# reboot, when the container is launched before the service comes up). Best-effort, non-fatal.
+if [ ! -S /run/jtop.sock ]; then
+    if systemctl cat jtop.service >/dev/null 2>&1; then
+        echo "== ensuring host jtop.service is up (GPU/VRAM/CPU panel needs /run/jtop.sock) =="
+        sudo systemctl start jtop.service 2>/dev/null || true
+        for _ in $(seq 1 10); do
+            if [ -S /run/jtop.sock ]; then break; fi
+            sleep 1
+        done
+    fi
+    if [ ! -S /run/jtop.sock ]; then
+        echo "sam-demo: WARN /run/jtop.sock missing -> GPU/VRAM/CPU panel may stay empty." >&2
+        echo "          Fix: run setup_host.sh (installs jetson-stats + enables jtop.service)." >&2
+    fi
+fi
+
 cd "$JC"
 TAG="$(./autotag nanoowl)"           # diagnostics go to stderr; only the tag on stdout
 echo "== sam-demo: launching $TAG → container_setup.sh (web UI on :7860) =="
