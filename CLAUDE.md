@@ -133,6 +133,22 @@ to build the OWL engine, generate the test video, patch the demo, and launch the
   **Also (self-heal):** `container/run_demo.sh` now starts `jtop.service` and waits for
   `/run/jtop.sock` BEFORE launching the container, so the panel works even after a reboot
   (the socket must exist before `jetson-containers run`, which only mounts it if present).
+- **GPU/VRAM panel empty #2 — jtop VERSION MISMATCH (FIXED).** Different failure from the socket one
+  above: here `jtop.service` is active, `/run/jtop.sock` exists AND is mounted, and the panel STILL
+  shows nothing. jtop refuses to talk across versions:
+  `JtopException: Mismatch version jtop service: [4.3.2] and client: [7.2.0]`.
+  **Cause:** `install_webui.sh` installed `jetson-stats` **unpinned**, so a container built today pulls
+  the latest (7.2.0) while the host still runs 4.3.2. It also only installed when jtop was *missing*
+  (`python3 -c "import jtop" || pip install ...`), so a wrong-version jtop was never corrected.
+  **Fix:** `run_demo.sh` writes the HOST's jetson-stats version to `$JC/data/.jtop_version`;
+  `install_webui.sh` pins the container to that exact version (`jetson-stats==$JTOP_VER`) and no longer
+  skips on a successful import. Self-matching for any host version.
+  **Diagnose (inside the container):**
+  `docker exec <c> python3 -c "from jtop import jtop; j=jtop(); j.start(); print(j.ok())"` — a mismatch
+  raises the JtopException. Compare `jtop --version` (host) vs
+  `python3 -c "import jtop; print(jtop.__version__)"` (container); they MUST be equal.
+  **Lesson:** the host↔container jtop versions are a matched pair — never install jetson-stats unpinned
+  on either side.
 - **Repo location is self-correcting.** `setup_host.sh` relocates the checkout to
   `~/Public/nanosam` if it was cloned elsewhere (e.g. `~/nanosam`), so nanosam and the shared
   `~/Public/jetson-containers` always end up side-by-side under `~/Public`.
