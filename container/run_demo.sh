@@ -66,6 +66,20 @@ if [ ! -S /run/jtop.sock ]; then
     fi
 fi
 
+# Pin the container's jetson-stats to the HOST's version. The jtop client refuses to talk
+# to a different-version jtop service, which silently empties the GPU/VRAM/CPU panel.
+# install_webui.sh reads this file and installs the matching version.
+HOST_JTOP_VER="$(jtop --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+if [ -z "${HOST_JTOP_VER:-}" ]; then
+    HOST_JTOP_VER="$(pip3 show jetson-stats 2>/dev/null | awk '/^Version:/{print $2}' || true)"
+fi
+if [ -n "${HOST_JTOP_VER:-}" ]; then
+    echo "== host jetson-stats $HOST_JTOP_VER -> container will pin jtop to match =="
+    echo "$HOST_JTOP_VER" > "$JC/data/.jtop_version"
+else
+    rm -f "$JC/data/.jtop_version" 2>/dev/null || true
+fi
+
 cd "$JC"
 TAG="$(./autotag nanoowl)"           # diagnostics go to stderr; only the tag on stdout
 echo "== sam-demo: launching $TAG → container_setup.sh (web UI on :7860) =="

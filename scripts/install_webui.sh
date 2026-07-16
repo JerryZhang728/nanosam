@@ -17,9 +17,27 @@ python3 -m pip install --index-url https://pypi.org/simple \
 # jetson-stats (jtop) gives gpu_monitor.py access to Jetson tegrastats. Best-effort —
 # it needs the host's jtop.service for full data; without it the GPU panel will fall
 # back to nvidia-ml-py and still work.
-python3 -c "import jtop" 2>/dev/null || \
-    python3 -m pip install --index-url https://pypi.org/simple jetson-stats || \
-    echo "(jetson-stats install failed — GPU monitor will be limited)"
+# The jtop CLIENT must match the host's jtop SERVICE version exactly, or it refuses to
+# connect ("Mismatch version jtop service: [x] and client: [y]") and the GPU/VRAM panel
+# silently shows no data. run_demo.sh writes the host's version to /data/.jtop_version.
+# NOTE: do NOT skip when "import jtop" already succeeds - the base image often ships a
+# NEWER jetson-stats than the host, which is exactly the mismatch we need to correct.
+JTOP_VER="$(tr -d '[:space:]' < /data/.jtop_version 2>/dev/null || true)"
+JTOP_CUR="$(python3 -c 'import jtop; print(jtop.__version__)' 2>/dev/null || true)"
+if [ -n "$JTOP_VER" ]; then
+    if [ "$JTOP_CUR" = "$JTOP_VER" ]; then
+        echo ">> jetson-stats $JTOP_CUR already matches host jtop.service"
+    else
+        echo ">> pinning jetson-stats to host version $JTOP_VER (container had ${JTOP_CUR:-none})"
+        python3 -m pip install --index-url https://pypi.org/simple "jetson-stats==$JTOP_VER" || \
+            echo "(jetson-stats==$JTOP_VER install failed - GPU/VRAM panel may stay empty)"
+    fi
+else
+    # No host version file - host jetson-stats probably not installed. Best effort, unpinned.
+    python3 -c "import jtop" 2>/dev/null || \
+        python3 -m pip install --index-url https://pypi.org/simple jetson-stats || \
+        echo "(jetson-stats install failed - GPU monitor will be limited)"
+fi
 
 # supervision => ByteTrack, for the "NanoOWL + ByteTrack" mode. Install --no-deps: the image
 # already has a CUDA-built cv2 and numpy 1.x; supervision's default deps pull a preview
