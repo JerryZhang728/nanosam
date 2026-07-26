@@ -191,37 +191,26 @@ else
 fi
 
 echo
-echo "==[7/7] Extras: browser + suspend/logging hardening ======"
+echo "==[7/7] Extras: browser + anti-suspend hardening ======"
 # firefox to open the demo UI locally on the device (best-effort; non-critical).
 command -v firefox >/dev/null 2>&1 || sudo apt-get install -y firefox 2>/dev/null \
   || echo ">> firefox install skipped (non-critical)."
-# A desktop-image Jetson auto-suspends on idle (~20 min) and the Orin often fails to
-# resume from S3 -> the box goes DEAD until a power cycle. Mask sleep + ignore idle.
+# A desktop-image Jetson auto-suspends on idle (~20 min), AND can be suspended from the
+# GNOME menu / lid / power keys; the Orin often fails to resume from S3 -> the box goes
+# DEAD until a power cycle. Block every path: mask the sleep targets + tell logind to
+# ignore idle and the suspend/lid/hibernate keys.
 sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true
-if grep -qE '^#?IdleAction=' /etc/systemd/logind.conf; then
-  sudo sed -i -E 's/^#?IdleAction=.*/IdleAction=ignore/' /etc/systemd/logind.conf
-else
-  echo 'IdleAction=ignore' | sudo tee -a /etc/systemd/logind.conf >/dev/null
-fi
+for kv in IdleAction=ignore HandleSuspendKey=ignore HandleLidSwitch=ignore HandleLidSwitchExternalPower=ignore HandleHibernateKey=ignore; do
+  k=${kv%%=*}
+  if grep -qE "^#?$k=" /etc/systemd/logind.conf; then
+    sudo sed -i -E "s/^#?$k=.*/$kv/" /etc/systemd/logind.conf
+  else
+    echo "$kv" | sudo tee -a /etc/systemd/logind.conf >/dev/null
+  fi
+done
 sudo systemctl restart systemd-logind 2>/dev/null || true
 gsettings set org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type 'nothing' 2>/dev/null || true
-echo ">> idle-suspend disabled (masked sleep targets + IdleAction=ignore)."
-# journald defaults to VOLATILE (RAM) -> crash logs vanish on reboot. Make it persistent
-# so 'journalctl -b -1' can post-mortem a crash. Capped at 500M.
-sudo mkdir -p /var/log/journal
-if grep -qE '^#?Storage=' /etc/systemd/journald.conf; then
-  sudo sed -i -E 's/^#?Storage=.*/Storage=persistent/' /etc/systemd/journald.conf
-else
-  echo 'Storage=persistent' | sudo tee -a /etc/systemd/journald.conf >/dev/null
-fi
-if grep -qE '^#?SystemMaxUse=' /etc/systemd/journald.conf; then
-  sudo sed -i -E 's/^#?SystemMaxUse=.*/SystemMaxUse=500M/' /etc/systemd/journald.conf
-else
-  echo 'SystemMaxUse=500M' | sudo tee -a /etc/systemd/journald.conf >/dev/null
-fi
-sudo systemd-tmpfiles --create --prefix /var/log/journal 2>/dev/null || true
-sudo systemctl restart systemd-journald
-echo ">> persistent journald enabled (crash logs survive reboot)."
+echo ">> suspend disabled (masked targets + logind ignores idle/keys)."
 
 echo "== Install the 'sam-demo' launcher ======================="
 sudo chmod +x "$REPO/container/run_demo.sh"
