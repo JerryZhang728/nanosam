@@ -6,6 +6,20 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
+# If invoked via sudo, drop back to the real login user so $HOME/$USER are correct.
+# Running the WHOLE script as root put the repo in /root/Public, added ROOT (not the
+# login user) to the docker group, and pointed the sam-demo symlink into /root - all
+# unusable by the login user (sam-demo "command not found" / cannot run).
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+  echo "== re-running as '$SUDO_USER' (not root) so files land in that user's home =="
+  exec sudo -u "$SUDO_USER" -H bash "$(realpath "$0")" "$@"
+fi
+if [ "$(id -u)" -eq 0 ]; then
+  echo "ERROR: run as your normal user (it sudo's the steps that need root):" >&2
+  echo "         bash setup_host.sh" >&2
+  exit 1
+fi
+
 # Resolve repo root so this works no matter where it's invoked from.
 REPO="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 
