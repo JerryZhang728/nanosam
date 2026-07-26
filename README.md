@@ -5,7 +5,7 @@ factory-AOI demos. Clone to any Jetson (JetPack 6.x / L4T R36.x) and run.
 
 ## TL;DR — fresh L4T Jetson
 ```bash
-sudo apt install -y git && mkdir -p ~/Public && git clone https://github.com/JerryZhang728/nanosam.git ~/Public/nanosam && cd ~/Public/nanosam
+sudo apt update && sudo apt install -y git && mkdir -p ~/Public && git clone https://github.com/JerryZhang728/nanosam.git ~/Public/nanosam && cd ~/Public/nanosam
 bash setup_host.sh      # sets up Docker, jetson-containers, and the 'sam-demo' command
 newgrp docker           # fresh box only, one time (activates the docker group)
 sam-demo                # stage + launch (first run builds engines — a few minutes)
